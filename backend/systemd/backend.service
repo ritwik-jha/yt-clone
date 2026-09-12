@@ -1,0 +1,17 @@
+[Unit]
+Description=Video Platform FastAPI backend
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/video-backend
+EnvironmentFile=/opt/video-backend/.env
+ExecStart=/opt/video-backend/.venv/bin/uvicorn app.main:app \
+    --host ${APP_HOST} --port ${APP_PORT} --workers 2 --proxy-headers
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

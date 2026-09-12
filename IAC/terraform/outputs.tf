@@ -1,0 +1,71 @@
+output "vpc_id" {
+  value = aws_vpc.this.id
+}
+
+output "public_subnet_ids" {
+  value = aws_subnet.public[*].id
+}
+
+output "workload_security_group_id" {
+  value = aws_security_group.egress_only.id
+}
+
+output "redis_security_group_id" {
+  value = aws_security_group.redis.id
+}
+
+output "raw_bucket" {
+  value = aws_s3_bucket.raw.bucket
+}
+
+output "processed_bucket" {
+  value = aws_s3_bucket.processed.bucket
+}
+
+output "ingest_queue_url" {
+  value = aws_sqs_queue.main.url
+}
+
+output "ingest_dlq_url" {
+  value = aws_sqs_queue.dlq.url
+}
+
+output "completion_queue_url" {
+  value = aws_sqs_queue.completion.url
+}
+
+output "completion_queue_arn" {
+  value = aws_sqs_queue.completion.arn
+}
+
+output "completion_dlq_url" {
+  value = aws_sqs_queue.completion_dlq.url
+}
+
+output "redis_endpoint" {
+  value = local.redis_uri
+}
+
+output "dynamodb_table" {
+  value = aws_dynamodb_table.video_status.name
+}
+
+output "dynamodb_users_table" {
+  value = aws_dynamodb_table.users.name
+}
+
+output "ecs_cluster" {
+  value = aws_ecs_cluster.this.name
+}
+
+output "task_definition_arn" {
+  value = aws_ecs_task_definition.transcoder.arn
+}
+
+output "ecr_repository_url" {
+  value = aws_ecr_repository.transcoder.repository_url
+}
+
+output "lambda_function_name" {
+  value = aws_lambda_function.dispatcher.function_name
+}

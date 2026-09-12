@@ -1,0 +1,16 @@
+[Unit]
+Description=Video Platform completion queue -> DynamoDB poller
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/video-backend
+EnvironmentFile=/opt/video-backend/.env
+ExecStart=/opt/video-backend/.venv/bin/python -m app.workers.completion_poller
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
