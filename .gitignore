@@ -1,4 +1,0 @@
-.env*
-terraform.tfvars*
-variables.tf 
-.aider*

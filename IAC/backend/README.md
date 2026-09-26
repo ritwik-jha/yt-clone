@@ -36,7 +36,7 @@ Cookies set by login: `access_token` (1h) and `refresh_token` (5d),
 ## Layout
 
 ```
-backend/
+IAC/backend/
 ├── app/
 │   ├── main.py                        # FastAPI app
 │   ├── config.py                      # pydantic-settings from .env

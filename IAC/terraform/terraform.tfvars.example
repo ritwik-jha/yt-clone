@@ -1,0 +1,32 @@
+# Copy this file to terraform.tfvars and update values.
+aws_region             = "ap-south-1"
+project_name           = "video-transcoder"
+
+# Must be globally unique across all AWS S3.
+raw_bucket_name        = "my-org-raw-videos"
+processed_bucket_name  = "my-org-processed-videos"
+
+# DynamoDB table used by the backend app (partition key: video_id).
+dynamodb_table_name    = "video-status"
+
+# Completion queue drained by the backend poller.
+completion_queue_name  = "video-completion-queue"
+
+# Redis (ElastiCache Serverless) — used ONLY for per-video lock + progress.
+redis_cache_name          = "video-progress-cache"
+redis_lock_key_prefix     = "video:lock"
+redis_progress_key_prefix = "video:progress"
+redis_lock_ttl_seconds    = 1800
+
+# Network sizing
+vpc_cidr               = "10.42.0.0/16"
+az_count               = 2
+
+# Image build arch — set X86_64 if you build on Intel/AMD.
+cpu_architecture       = "ARM64"
+image_tag              = "latest"
+
+tags = {
+  Environment = "dev"
+  Owner       = "video-platform"
+}
