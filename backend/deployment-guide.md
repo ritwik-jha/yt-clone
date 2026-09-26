@@ -30,8 +30,11 @@ pipeline resources.
 | SSM SecureString parameter holding the `.env` | `ssm.tf` |
 | CloudWatch log group `/video-backend` | `logs.tf` |
 
-Still **not** created by any stack in this repo: the **Cognito user pool**,
-and any **ALB / TLS certificate** in front of the instance.
+The Cognito user pool + app client this instance authenticates against is
+provisioned by the **pipeline** stack (`IAC/terraform/cognito.tf`), not here —
+this stack only reads its ARN via `terraform_remote_state` to scope the
+instance's IAM policy. Still **not** created by any stack in this repo: any
+**ALB / TLS certificate** in front of the instance.
 
 ---
 
@@ -58,9 +61,8 @@ value, so `terraform apply` never has to hold `COGNITO_CLIENT_SECRET`.
 
 ## 3. Prerequisites
 
-- Pipeline stack applied (`IAC/terraform`), state file reachable.
-- A Cognito user pool and app client, **with a client secret** and
-  `USER_PASSWORD_AUTH` enabled. Note the pool ARN, client id, client secret.
+- Pipeline stack applied (`IAC/terraform`), state file reachable — this is
+  also where the Cognito user pool + app client get created.
 - Terraform ≥ 1.5, AWS CLI v2, Docker with `buildx`, `jq`.
 - The Session Manager plugin for the AWS CLI, if you want a shell on the box
   without opening SSH.
@@ -76,11 +78,10 @@ cd backend/terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Two values are required and have no default:
+One value is required and has no default:
 
 | Variable | Value |
 |---|---|
-| `cognito_user_pool_arn` | ARN of the pool from the prerequisites |
 | `thumbnails_bucket_name` | a globally unique S3 bucket name |
 
 Check `aws_region` matches the pipeline. A mismatch fails the plan with an
@@ -121,21 +122,15 @@ set `cpu_architecture = "amd64"`, an `m*`/`t3` instance type, and run
 ### Step 4 — Generate and push the `.env`
 
 `generate-env.sh` reads both Terraform states and fills in every
-infrastructure value. Cognito is not Terraform-managed, so supply those three
-values yourself — either exported in the shell, or already present in
-`backend/.env`:
+infrastructure value, Cognito included:
 
 ```bash
-export COGNITO_USER_POOL_ID=ap-south-1_XXXXXXXXX
-export COGNITO_CLIENT_ID=...
-export COGNITO_CLIENT_SECRET=...
-
 scripts/generate-env.sh --push-ssm
 ```
 
 This writes `backend/.env` (mode 600, gitignored) and uploads it to the SSM
-parameter. The script refuses to run if a Cognito value is missing or still
-holds the `.env.example` placeholder.
+parameter. The script refuses to run if a required value — Cognito among
+them — can't be read from the pipeline state.
 
 Review the generated file before the push if you want to change anything the
 script carries over rather than derives — `CORS_ORIGINS`, `COOKIE_SECURE`,

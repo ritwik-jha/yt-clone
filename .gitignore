@@ -1,0 +1,28 @@
+# generate-env.sh writes real credentials here
+.env
+!.env.example
+
+.venv/
+__pycache__/
+*.py[cod]
+
+# terraform
+IAC/terraform/.terraform/
+IAC/terraform/.terraform.lock.hcl
+IAC/terraform/terraform.tfstate
+IAC/terraform/terraform.tfstate.*
+IAC/terraform/terraform.tfvars
+IAC/terraform/*.tfplan
+IAC/terraform/build/*
+!terraform/terraform.tfvars.example
+
+backend/terraform/.terraform/
+backend/terraform/.terraform.lock.hcl
+backend/terraform/terraform.tfstate
+backend/terraform/terraform.tfstate.*
+backend/terraform/terraform.tfvars
+backend/terraform/*.tfplan
+
+*.mp4
+.DS_Store
+*.csv

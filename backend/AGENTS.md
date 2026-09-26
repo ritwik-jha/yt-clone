@@ -71,8 +71,9 @@ the values arrive as process environment (compose `env_file`), so the
 
 `.env` is **generated, not hand-written** — `scripts/generate-env.sh` reads
 the pipeline and backend Terraform states and fills in every infrastructure
-value. Only Cognito credentials and policy knobs (CORS, cookies, TTLs) are
-carried over from the previous file / environment / `.env.example`. If you
+value, Cognito included (`IAC/terraform/cognito.tf`). Only policy knobs
+(CORS, cookies, TTLs) are carried over from the previous file / environment /
+`.env.example`. If you
 add a setting to `config.py`, add it to `.env.example` **and** to the emit
 block in `generate-env.sh`, or it will be silently dropped on the next
 regeneration.
@@ -99,7 +100,7 @@ into the image and never put it in Terraform.
   Transcoder is the sole writer. Never mint progress values in the
   backend.
 
-## Auth flow (mirror of `../IAC/deployment-guide.md` and `../auth-implementation-guide.md`)
+## Auth flow (mirror of `../IAC/deployment-guide.md` and `../docs/auth-implementation-guide.md`)
 
 - App client MUST have a **client secret** and `USER_PASSWORD_AUTH`
   enabled — otherwise `initiate_auth` rejects the `SECRET_HASH`.
@@ -131,7 +132,7 @@ into the image and never put it in Terraform.
 Defined in `terraform/iam.tf`, not by hand:
 
 - `cognito-idp:{SignUp, ConfirmSignUp, InitiateAuth, GetUser}` on the
-  user pool ARN (`var.cognito_user_pool_arn`).
+  user pool ARN (`local.pipeline.cognito_user_pool_arn`).
 - `dynamodb:{GetItem, PutItem, UpdateItem, Query}` on both tables and
   their `index/*`.
 - `s3:PutObject` on `raw-bucket/videos/*` and `thumbnails-bucket/thumbnails/*`
@@ -203,8 +204,7 @@ Full playbook in `deployment-guide.md`. High-level, pipeline already applied:
    thumbnails bucket, log group.
 2. `scripts/push-image.sh` — buildx to ECR. Platform must match
    `cpu_architecture` (default arm64 / `t4g.small`).
-3. `scripts/generate-env.sh --push-ssm` — needs `COGNITO_*` in the
-   environment.
+3. `scripts/generate-env.sh --push-ssm`.
 4. `sudo systemctl restart video-backend` over Session Manager.
 5. `aws logs tail /video-backend --follow`.
 

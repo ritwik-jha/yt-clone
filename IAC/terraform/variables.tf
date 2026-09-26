@@ -176,6 +176,47 @@ variable "dynamodb_users_table_name" {
   default     = "users"
 }
 
+# ---------- Cognito (identity provider) ----------
+variable "cognito_user_pool_name" {
+  description = "Name of the Cognito user pool backing the backend's auth routes"
+  type        = string
+  default     = "video-transcoder-users"
+}
+
+variable "cognito_client_name" {
+  description = "Name of the confidential app client the backend authenticates through"
+  type        = string
+  default     = "video-backend-client"
+}
+
+variable "cognito_password_min_length" {
+  description = "Minimum password length enforced by the user pool"
+  type        = number
+  default     = 8
+}
+
+variable "cognito_mfa_configuration" {
+  description = "Pool MFA requirement: OFF, ON, or OPTIONAL"
+  type        = string
+  default     = "OFF"
+
+  validation {
+    condition     = contains(["OFF", "ON", "OPTIONAL"], var.cognito_mfa_configuration)
+    error_message = "cognito_mfa_configuration must be OFF, ON, or OPTIONAL."
+  }
+}
+
+variable "cognito_deletion_protection" {
+  description = "Set to ACTIVE to block accidental pool deletion. INACTIVE lets 'terraform destroy' work in dev."
+  type        = string
+  default     = "INACTIVE"
+
+  validation {
+    condition     = contains(["ACTIVE", "INACTIVE"], var.cognito_deletion_protection)
+    error_message = "cognito_deletion_protection must be ACTIVE or INACTIVE."
+  }
+}
+
 # ---------- Lambda dispatcher ----------
 variable "lambda_batch_size" {
   description = "Max SQS messages per Lambda invocation"

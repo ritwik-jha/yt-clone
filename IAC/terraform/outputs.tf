@@ -103,3 +103,20 @@ output "ecr_repository_url" {
 output "lambda_function_name" {
   value = aws_lambda_function.dispatcher.function_name
 }
+
+output "cognito_user_pool_id" {
+  value = aws_cognito_user_pool.this.id
+}
+
+output "cognito_user_pool_arn" {
+  value = aws_cognito_user_pool.this.arn
+}
+
+output "cognito_user_pool_client_id" {
+  value = aws_cognito_user_pool_client.backend.id
+}
+
+output "cognito_user_pool_client_secret" {
+  value     = aws_cognito_user_pool_client.backend.client_secret
+  sensitive = true
+}

@@ -108,6 +108,9 @@ All defaults live in `terraform/variables.tf`; override any of these in
 | Lambda batch size / window | `lambda_batch_size` / `lambda_batch_window_seconds` | `10` / `5` | `terraform.tfvars` |
 | Ingest SQS visibility timeout | `sqs_visibility_timeout_seconds` | `180` | ≥ 6× lambda timeout |
 | Max receives → DLQ | `sqs_max_receive_count` | `3` | `terraform.tfvars` |
+| Cognito user pool name | `cognito_user_pool_name` | `video-transcoder-users` | `terraform.tfvars` |
+| Cognito app client name | `cognito_client_name` | `video-backend-client` | `terraform.tfvars` |
+| Cognito MFA | `cognito_mfa_configuration` | `OFF` | `terraform.tfvars` |
 
 ### 1.1 Assumptions the pipeline makes about the upload
 
@@ -132,10 +135,12 @@ All defaults live in `terraform/variables.tf`; override any of these in
   modify anything here — except for one ingress rule it adds to
   `aws_security_group.redis` so the instance can reach the cache.
   Walkthrough: `../backend/deployment-guide.md`.
-- **The Cognito user pool + app client.** The `users` DynamoDB table is
-  provisioned here (`dynamodb.tf`), but the identity provider it mirrors
-  is not — provision it manually or in a separate module.
 - **An ALB or TLS certificate** in front of the backend.
+
+The Cognito user pool + app client (`cognito.tf`) and the `users` DynamoDB
+table it mirrors (`dynamodb.tf`) **are** both provisioned here — the pool
+uses email as the username (`username_attributes = ["email"]`), matching
+how `../backend/app/routers/auth.py` signs up, confirms, and logs in.
 
 ### 1.3 Backend poller — contract
 
@@ -232,7 +237,7 @@ A separate stack, applied after this one. Full walkthrough:
 
 ```bash
 cd ../backend/terraform
-cp terraform.tfvars.example terraform.tfvars   # cognito_user_pool_arn, thumbnails_bucket_name
+cp terraform.tfvars.example terraform.tfvars   # thumbnails_bucket_name
 terraform init && terraform apply              # EC2, IAM, SG, ECR, SSM, thumbnails bucket
 
 cd ..
@@ -249,7 +254,8 @@ the instance reach `redis_endpoint` on 6379.
 Filename stem becomes `VIDEO_ID`:
 
 ```bash
-RAW_BUCKET=$(terraform -chdir=../terraform output -raw raw_bucket)
+cd IAC   # if currently in backend/, use: cd ../IAC
+RAW_BUCKET=$(terraform -chdir=terraform output -raw raw_bucket)
 VIDEO_ID=$(uuidgen)
 aws s3 cp ./sample.mp4 "s3://$RAW_BUCKET/raw/$VIDEO_ID.mp4"
 ```

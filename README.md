@@ -121,11 +121,13 @@ stereo AAC track, 4-second segments.
 | EC2 instance, instance profile, security group | `backend/terraform/ec2.tf`, `iam.tf`, `network.tf` |
 | ECR repo for the backend image, `.env` SSM parameter, log group | `backend/terraform/{ecr,ssm,logs}.tf` |
 | S3 thumbnails bucket | `backend/terraform/storage.tf` |
-| **Cognito user pool + app client** | manual / separate module |
+| Cognito user pool + app client | `IAC/terraform/cognito.tf` |
 | **ALB / TLS certificate in front of the backend** | manual / separate module |
 
-The Cognito app client must have a client secret and `USER_PASSWORD_AUTH`
-enabled, or `initiate_auth` will reject the computed `SECRET_HASH`.
+The Cognito app client has a secret and `USER_PASSWORD_AUTH` enabled, or
+`initiate_auth` would reject the computed `SECRET_HASH`. The pool uses email
+as the username (`username_attributes = ["email"]`), matching how
+`backend/app/routers/auth.py` signs up, confirms, and logs in.
 
 ---
 
@@ -138,8 +140,8 @@ cd IAC/terraform && cp terraform.tfvars.example terraform.tfvars
 ```
 
 then follow `IAC/deployment-guide.md` (apply → build/push the transcoder
-image → deploy the backend → smoke test). Cognito must exist before the
-backend stack: it is not created by either stack.
+image → deploy the backend → smoke test). This stack also creates the
+Cognito user pool + app client the backend authenticates against.
 
 Backend, after the pipeline is up — see `backend/deployment-guide.md`:
 
@@ -150,8 +152,8 @@ cd .. && scripts/push-image.sh && scripts/generate-env.sh --push-ssm
 ```
 
 The two containers (`api`, `poller`) run from one image on a single EC2
-instance. `scripts/generate-env.sh` derives the whole `.env` from both
-stacks' Terraform state; only the Cognito credentials are supplied by hand.
+instance. `scripts/generate-env.sh` derives the whole `.env`, Cognito
+included, from both stacks' Terraform state — nothing is supplied by hand.
 
 Backend locally:
 

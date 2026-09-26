@@ -4,9 +4,10 @@
 #
 # Reads the outputs of the pipeline stack (IAC/terraform) and, when it has
 # been applied, the backend stack (backend/terraform), and writes every
-# infrastructure-derived variable into .env. Values Terraform does not own
-# (Cognito credentials, cookie/CORS policy) are carried over from the
-# existing .env, then from the process environment, then from .env.example.
+# infrastructure-derived variable into .env — including Cognito, which the
+# pipeline stack provisions. Values no stack owns (cookie/CORS policy) are
+# carried over from the existing .env, then from the process environment,
+# then from .env.example.
 #
 # Two ways to read state:
 #   default        `terraform -chdir=<dir> output -json`  (works with any backend)
@@ -143,21 +144,11 @@ if [[ -z "$THUMB_BUCKET" ]]; then
   [[ -n "$THUMB_BUCKET" ]] || die "S3_THUMBNAILS_BUCKET unresolved — apply backend/terraform or set it in the environment"
 fi
 
-COGNITO_POOL="$(carried COGNITO_USER_POOL_ID)"
-COGNITO_CLIENT="$(carried COGNITO_CLIENT_ID)"
-COGNITO_SECRET="$(carried COGNITO_CLIENT_SECRET)"
-
-# Cognito is provisioned outside Terraform, so placeholders must not survive
-# into a file that is about to be pushed to an instance.
-for pair in "COGNITO_USER_POOL_ID=$COGNITO_POOL" \
-            "COGNITO_CLIENT_ID=$COGNITO_CLIENT" \
-            "COGNITO_CLIENT_SECRET=$COGNITO_SECRET"; do
-  key="${pair%%=*}"; val="${pair#*=}"
-  [[ -n "$val" ]] || die "$key is empty — export it or set it in $OUT_FILE"
-  case "$val" in
-    *xxxx*|*XXXX*) die "$key still holds the .env.example placeholder — set a real value" ;;
-  esac
-done
+# Cognito is provisioned by the pipeline stack (IAC/terraform/cognito.tf),
+# same as the other required values above — no manual carry-over needed.
+COGNITO_POOL="$(require COGNITO_USER_POOL_ID "$(pipeline_out cognito_user_pool_id)")"
+COGNITO_CLIENT="$(require COGNITO_CLIENT_ID "$(pipeline_out cognito_user_pool_client_id)")"
+COGNITO_SECRET="$(require COGNITO_CLIENT_SECRET "$(pipeline_out cognito_user_pool_client_secret)")"
 
 # ------------------------------------------------------------------- emit
 
@@ -181,7 +172,7 @@ COOKIE_SAMESITE=$(carried COOKIE_SAMESITE)
 # --- AWS ---
 AWS_REGION=${AWS_REGION_V}
 
-# --- Cognito (not Terraform-managed) ---
+# --- Cognito (pipeline stack) ---
 COGNITO_USER_POOL_ID=${COGNITO_POOL}
 COGNITO_CLIENT_ID=${COGNITO_CLIENT}
 COGNITO_CLIENT_SECRET=${COGNITO_SECRET}

@@ -8,10 +8,10 @@ The EC2 stack the backend containers run on. Applied **after**
 | File | Owns |
 |---|---|
 | `providers.tf` | AWS provider, `default_tags`, `locals` (account, region, `pipeline`, `backend_image`), `check` asserting the region matches the pipeline |
-| `variables.tf` | Every knob. Two required inputs: `cognito_user_pool_arn`, `thumbnails_bucket_name` |
+| `variables.tf` | Every knob. One required input: `thumbnails_bucket_name`. (Cognito needs no input — its ARN comes from `local.pipeline`.) |
 | `data.tf` | `terraform_remote_state.pipeline` (local or s3), Canonical's public SSM parameter for the Ubuntu AMI id |
 | `network.tf` | Instance SG in the pipeline VPC, opt-in API/SSH ingress, and the rule adding this SG as a source on the pipeline's Redis SG |
-| `iam.tf` | Instance role + profile: Cognito, DynamoDB, S3 presign authority, SQS completion queue, SSM/KMS for the env parameter, ECR pull, CloudWatch logs, `AmazonSSMManagedInstanceCore` |
+| `iam.tf` | Instance role + profile: Cognito (scoped to `local.pipeline.cognito_user_pool_arn`), DynamoDB, S3 presign authority, SQS completion queue, SSM/KMS for the env parameter, ECR pull, CloudWatch logs, `AmazonSSMManagedInstanceCore` |
 | `storage.tf` | Thumbnails S3 bucket (public access blocked, SSE, CORS for presigned PUT) |
 | `ssm.tf` | SecureString parameter `/<backend_name>/env`, placeholder value, `ignore_changes = [value]` |
 | `logs.tf` | CloudWatch log group `/<backend_name>` for both container streams |
@@ -23,7 +23,7 @@ The EC2 stack the backend containers run on. Applied **after**
 ## Conventions
 
 - **This stack never declares pipeline resources.** VPC, subnets, buckets,
-  queues, tables, and Redis all come from `local.pipeline`
+  queues, tables, Redis, and the Cognito pool all come from `local.pipeline`
   (`data.terraform_remote_state.pipeline.outputs`). If you need a new
   coordinate, add an output to `../../IAC/terraform/outputs.tf` — do not
   rebuild the value from name fragments.

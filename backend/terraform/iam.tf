@@ -33,7 +33,7 @@ data "aws_iam_policy_document" "instance" {
       "cognito-idp:InitiateAuth",
       "cognito-idp:GetUser",
     ]
-    resources = [var.cognito_user_pool_arn]
+    resources = [local.pipeline.cognito_user_pool_arn]
   }
 
   statement {

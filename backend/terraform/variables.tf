@@ -47,21 +47,8 @@ variable "pipeline_state_s3_key" {
   default     = "video-transcoder/terraform.tfstate"
 }
 
-# --- Cognito (provisioned outside Terraform) ------------------------------
-
-variable "cognito_user_pool_arn" {
-  description = <<-EOT
-    ARN of the Cognito user pool the backend authenticates against. Not
-    created by any stack in this repo — provision the pool first and pass its
-    ARN so the instance policy can be scoped to it.
-  EOT
-  type        = string
-
-  validation {
-    condition     = can(regex("^arn:aws[a-z-]*:cognito-idp:", var.cognito_user_pool_arn))
-    error_message = "cognito_user_pool_arn must be a cognito-idp user pool ARN."
-  }
-}
+# Cognito is provisioned by the pipeline stack (IAC/terraform/cognito.tf).
+# This stack reads its pool ARN from local.pipeline — no variable needed.
 
 # --- Thumbnails bucket ----------------------------------------------------
 

@@ -87,12 +87,12 @@ Terraform state of both stacks:
 | `REDIS_HOST` / `REDIS_PORT` | pipeline outputs `redis_host` / `redis_port` |
 | `REDIS_PROGRESS_PREFIX` | pipeline output `redis_progress_key_prefix` |
 | `S3_THUMBNAILS_BUCKET` | backend output `thumbnails_bucket` |
-| `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_CLIENT_SECRET` | **you** — not Terraform-managed |
+| `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_CLIENT_SECRET` | pipeline outputs `cognito_user_pool_id` / `cognito_user_pool_client_id` / `cognito_user_pool_client_secret` |
 | everything else (CORS, cookies, TTLs) | carried from the existing `.env`, then the environment, then `.env.example` |
 
-Cognito is not created by any stack in this repo. Provision the user pool and
-app client first; the app client MUST have a client secret and
-`USER_PASSWORD_AUTH` enabled.
+Cognito is provisioned by `IAC/terraform/cognito.tf` — a confidential app
+client (secret + `USER_PASSWORD_AUTH`) against a pool that uses email as the
+username, matching how `app/routers/auth.py` signs up and logs in.
 
 `.env` is gitignored and written mode 600. It holds
 `COGNITO_CLIENT_SECRET` — do not commit it, and do not bake it into the
@@ -119,12 +119,12 @@ The short version, assuming `IAC/terraform` is already applied:
 
 ```bash
 cd backend/terraform
-cp terraform.tfvars.example terraform.tfvars   # set cognito_user_pool_arn + thumbnails_bucket_name
+cp terraform.tfvars.example terraform.tfvars   # set thumbnails_bucket_name
 terraform init && terraform apply
 
 cd ..
 scripts/push-image.sh
-scripts/generate-env.sh --push-ssm             # needs COGNITO_* in the environment
+scripts/generate-env.sh --push-ssm
 aws ssm start-session --target "$(terraform -chdir=terraform output -raw instance_id)"
 #   sudo systemctl restart video-backend
 ```

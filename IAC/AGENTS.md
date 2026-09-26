@@ -79,7 +79,9 @@ Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET vid
 - **Backend never mints Redis progress values.** Progress is written by
   the transcoder only; the backend is read-only against Redis.
 - **Cognito is the identity source of truth.** DDB `users` table is a
-  mirror keyed by `cognito_sub` for FKs / joins only.
+  mirror keyed by `cognito_sub` for FKs / joins only. The pool
+  (`terraform/cognito.tf`) uses email as the username — `backend/app/routers/auth.py`
+  signs up, confirms, and logs in with `Username=<email>` throughout.
 
 ## Ownership of resources
 
@@ -95,7 +97,7 @@ Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET vid
 | ECR repo | `terraform/ecr.tf` | ECS |
 | ECS cluster + task def + CW log group | `terraform/ecs.tf` | Lambda dispatcher |
 | Lambda dispatcher + ESM | `terraform/lambda.tf` | SQS ingest queue |
-| Cognito user pool + app client | **manual / separate** | Backend |
+| Cognito user pool + app client | `terraform/cognito.tf` | Backend |
 | EC2 instance + instance profile + SG + ECR + SSM env param | `../backend/terraform/` | Backend + poller |
 | ALB / TLS certificate | **manual / separate** | Backend |
 
