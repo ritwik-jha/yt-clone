@@ -50,6 +50,10 @@ Key design points:
 
 ## 0. Repo Layout
 
+The pipeline infrastructure is this directory. The backend app that
+consumes the completion queue lives at the repo root in `../backend/` and
+is deployed separately (see `../backend/README.md`).
+
 ```
 IAC/
 ├── terraform/
@@ -72,6 +76,8 @@ IAC/
 │   ├── requirements.txt
 │   └── transcoder.py           # lock -> download -> ffmpeg -> upload -> completion SQS
 └── deployment-guide.md         # (this file)
+
+../backend/                     # FastAPI gateway + completion poller (EC2)
 ```
 
 ---
@@ -117,17 +123,25 @@ All defaults live in `terraform/variables.tf`; override any of these in
 
 ### 1.2 What this Terraform does NOT provision
 
-- **The backend app / poller.** You own that. Contract below.
-- **DynamoDB access for the backend.** Grant `dynamodb:PutItem`,
-  `dynamodb:UpdateItem`, `dynamodb:GetItem` on the table ARN to whatever
-  role your backend uses.
-- **Completion queue consumer permissions.** Grant `sqs:ReceiveMessage`,
-  `sqs:DeleteMessage`, `sqs:GetQueueAttributes` on
-  `completion_queue_arn` (Terraform output) to the backend role.
+- **The backend app and the EC2 instance it runs on.** Both live in a
+  second Terraform stack at `../backend/terraform/`, applied after this
+  one. It provisions the instance, its IAM role (scoped to the tables,
+  buckets, and queue below), its security group, an ECR repo, the
+  thumbnails bucket, and the SSM parameter carrying the backend `.env`.
+  It reads this stack's outputs via `terraform_remote_state` and does not
+  modify anything here — except for one ingress rule it adds to
+  `aws_security_group.redis` so the instance can reach the cache.
+  Walkthrough: `../backend/deployment-guide.md`.
+- **The Cognito user pool + app client.** The `users` DynamoDB table is
+  provisioned here (`dynamodb.tf`), but the identity provider it mirrors
+  is not — provision it manually or in a separate module.
+- **An ALB or TLS certificate** in front of the backend.
 
-### 1.3 Backend poller — expected behavior
+### 1.3 Backend poller — contract
 
-The poller drains the completion queue and upserts DynamoDB:
+Implemented by `../backend/app/workers/completion_poller.py`, run as the
+`poller` container on the backend instance. It drains the completion queue
+and upserts DynamoDB:
 
 - **Queue URL / ARN**: `completion_queue_url` / `completion_queue_arn`
   (Terraform outputs).
@@ -155,6 +169,9 @@ The poller drains the completion queue and upserts DynamoDB:
 - **Progress endpoint**: for the client-facing `GET /videos/{id}/progress`
   endpoint, the backend reads `video:progress:<video_id>` from Redis (same
   `redis_endpoint` output). No DynamoDB round-trip needed for progress.
+- **Failure handling**: on any exception the message is *not* deleted —
+  SQS redelivers after the visibility timeout and the DLQ catches poison
+  messages after `sqs_max_receive_count` receives.
 
 ---
 
@@ -208,16 +225,24 @@ docker buildx build \
   --push .
 ```
 
-### Step 4 — Wire up the backend poller (your app)
+### Step 4 — Deploy the backend + poller
 
-Grant the backend role permissions on the outputs from Step 2:
+A separate stack, applied after this one. Full walkthrough:
+**`../backend/deployment-guide.md`**. In brief:
 
+```bash
+cd ../backend/terraform
+cp terraform.tfvars.example terraform.tfvars   # cognito_user_pool_arn, thumbnails_bucket_name
+terraform init && terraform apply              # EC2, IAM, SG, ECR, SSM, thumbnails bucket
+
+cd ..
+scripts/push-image.sh                          # build + push the backend image
+scripts/generate-env.sh --push-ssm             # this stack's outputs -> .env -> SSM
 ```
-sqs:ReceiveMessage / DeleteMessage / GetQueueAttributes on completion_queue_arn
-dynamodb:PutItem / UpdateItem / GetItem on the video-status table ARN
-Network access to redis_endpoint (put the backend in the same VPC or peered VPC
-  and add its SG to the redis SG ingress rule)
-```
+
+That stack reads the outputs from Step 2 through `terraform_remote_state`,
+so nothing is copied by hand. It also adds the one ingress rule that lets
+the instance reach `redis_endpoint` on 6379.
 
 ### Step 5 — Smoke test
 
@@ -262,14 +287,19 @@ aws s3 ls "s3://$(terraform -chdir=../terraform output -raw processed_bucket)/$V
   next `RunTask`.
 - **Lambda**: edit `IAC/lambda/lambda_function.py` → `terraform apply`
   (source hash triggers redeploy).
+- **Backend**: edit `backend/` → re-sync to the EC2 instance and
+  `systemctl restart backend completion-poller`.
 
 ---
 
 ## 5. Teardown
 
+Destroy the backend stack **first** — it holds an ingress rule on this
+stack's Redis security group, and that rule blocks the SG's deletion:
+
 ```bash
-cd IAC/terraform
-terraform destroy
+cd backend/terraform && terraform destroy
+cd ../../IAC/terraform && terraform destroy
 ```
 
 S3 buckets have `force_destroy = true`. ECR is not force-deleted — run
@@ -290,8 +320,9 @@ S3 buckets have `force_destroy = true`. ECR is not force-deleted — run
   but if two consecutive stages take longer than TTL the lock could
   expire. Default 1800s covers most content up to ~30 min per stage.
 - **Redis reachability from the backend**: Redis lives in the pipeline
-  VPC. If your backend is elsewhere, either move it into this VPC, VPC-
-  peer, or add a NLB/PrivateLink. Don't expose Redis to the internet.
+  VPC, and the backend stack places its instance in the same VPC. If you
+  move the backend elsewhere, VPC-peer or add an NLB/PrivateLink. Don't
+  expose Redis to the internet.
 - **Duplicate dispatches are safe**: SQS at-least-once + Lambda partial-
   batch means occasional replays. The Redis lock in the transcoder
   suppresses duplicate work; a duplicate dispatch just exits cleanly.

@@ -1,0 +1,47 @@
+# Two containers, one image. Deployed on the EC2 instance provisioned by
+# backend/terraform. Both read the same .env, which scripts/generate-env.sh
+# produces from the pipeline Terraform outputs.
+#
+# BACKEND_IMAGE is supplied by scripts/deploy.sh (ECR URI + tag). For local
+# use it falls back to a locally built `video-backend:local`.
+
+services:
+  api:
+    image: ${BACKEND_IMAGE:-video-backend:local}
+    container_name: video-backend-api
+    restart: unless-stopped
+    env_file: .env
+    # Localhost-only by default so a plain `docker compose up` on a laptop
+    # does not expose the API. deploy.sh sets API_BIND=0.0.0.0 on the
+    # instance, where the security group is the access control.
+    ports:
+      - "${API_BIND:-127.0.0.1}:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: ${LOG_GROUP:-/video-backend}
+        awslogs-region: ${AWS_REGION:-ap-south-1}
+        awslogs-stream: api
+
+  poller:
+    image: ${BACKEND_IMAGE:-video-backend:local}
+    container_name: video-backend-poller
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.workers.completion_poller"]
+    # SIGTERM is handled by the worker; give it time to finish the in-flight
+    # batch rather than leaving messages invisible until the timeout lapses.
+    stop_grace_period: 30s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: ${LOG_GROUP:-/video-backend}
+        awslogs-region: ${AWS_REGION:-ap-south-1}
+        awslogs-stream: poller

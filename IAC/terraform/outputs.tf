@@ -1,3 +1,7 @@
+output "aws_region" {
+  value = var.aws_region
+}
+
 output "vpc_id" {
   value = aws_vpc.this.id
 }
@@ -46,12 +50,42 @@ output "redis_endpoint" {
   value = local.redis_uri
 }
 
+output "redis_host" {
+  value = local.redis_address
+}
+
+# Backend reads progress under this prefix; transcoder writes it. Exported so
+# the two cannot drift.
+output "redis_progress_key_prefix" {
+  value = var.redis_progress_key_prefix
+}
+
+output "redis_port" {
+  value = local.redis_port
+}
+
 output "dynamodb_table" {
   value = aws_dynamodb_table.video_status.name
 }
 
+output "dynamodb_table_arn" {
+  value = aws_dynamodb_table.video_status.arn
+}
+
 output "dynamodb_users_table" {
   value = aws_dynamodb_table.users.name
+}
+
+output "dynamodb_users_table_arn" {
+  value = aws_dynamodb_table.users.arn
+}
+
+output "raw_bucket_arn" {
+  value = aws_s3_bucket.raw.arn
+}
+
+output "processed_bucket_arn" {
+  value = aws_s3_bucket.processed.arn
 }
 
 output "ecs_cluster" {

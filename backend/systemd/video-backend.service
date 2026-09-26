@@ -1,0 +1,25 @@
+[Unit]
+Description=Video Platform backend (API + completion poller containers)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+# One-shot deploy: fetch .env from SSM, log in to ECR, compose up. The
+# containers themselves carry restart=unless-stopped, so Docker — not
+# systemd — is what keeps them alive between deploys.
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/video-backend
+ExecStart=/opt/video-backend/deploy.sh
+ExecStop=/usr/bin/docker compose -f /opt/video-backend/docker-compose.yml down
+TimeoutStartSec=600
+
+# On a fresh instance the SSM parameter may still hold the Terraform
+# placeholder. Retry rather than requiring a manual start once the real
+# .env has been pushed.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

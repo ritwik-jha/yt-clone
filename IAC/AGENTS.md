@@ -1,8 +1,11 @@
 # AGENTS.md — IAC (video transcoding pipeline)
 
 Serverless, event-driven video transcoding pipeline on AWS with per-video
-Redis locking, progress tracking, DynamoDB status persistence, and an
-EC2-hosted FastAPI gateway.
+Redis locking, progress tracking, and DynamoDB status persistence.
+
+The application tier that fronts this pipeline (FastAPI gateway + SQS
+completion poller) lives **outside this directory**, at `../backend/`.
+See `../backend/AGENTS.md`.
 
 ## Component map
 
@@ -17,14 +20,11 @@ IAC/
 ├── transcoder/    Fargate container. Redis lock -> download S3 ->
 │                  ffmpeg DASH ladder -> upload S3 -> completion SQS.
 │                  Writes progress % to Redis after each stage.
-├── backend/       FastAPI service for EC2. Cognito auth + presigned
-│                  upload URLs + video metadata + progress read.
-│                  Ships with a completion-queue poller worker.
 └── deployment-guide.md   Step-by-step deploy walkthrough.
 ```
 
-Each of the four component directories has its own `AGENTS.md` with
-directory-scoped conventions.
+Each of the three component directories has its own `AGENTS.md` with
+directory-scoped conventions. The repo-root layout is in `../README.md`.
 
 ## Data flow (one video, happy path)
 
@@ -87,7 +87,7 @@ Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET vid
 |---|---|---|
 | VPC + subnets + IGW + workload SG + redis SG | `terraform/network.tf` | Fargate, Redis |
 | S3 raw + processed buckets | `terraform/storage.tf` | Client (presigned PUT), transcoder |
-| S3 thumbnails bucket | **manual / separate** | Client (presigned PUT) |
+| S3 thumbnails bucket | `../backend/terraform/storage.tf` | Client (presigned PUT) |
 | SQS ingest queue + DLQ | `terraform/storage.tf` | Lambda dispatcher |
 | SQS completion queue + DLQ | `terraform/storage.tf` | Transcoder (send), backend poller (receive) |
 | ElastiCache Serverless Redis | `terraform/redis.tf` | Transcoder (RW), backend (RO) |
@@ -96,10 +96,16 @@ Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET vid
 | ECS cluster + task def + CW log group | `terraform/ecs.tf` | Lambda dispatcher |
 | Lambda dispatcher + ESM | `terraform/lambda.tf` | SQS ingest queue |
 | Cognito user pool + app client | **manual / separate** | Backend |
-| EC2 instance + instance profile + ALB/TLS | **manual / separate** | Backend + poller |
+| EC2 instance + instance profile + SG + ECR + SSM env param | `../backend/terraform/` | Backend + poller |
+| ALB / TLS certificate | **manual / separate** | Backend |
 
-Anything marked "manual / separate" is intentionally out of scope for this
-IaC — noted in `deployment-guide.md` and `backend/README.md`.
+Anything marked "manual / separate" is intentionally out of scope for both
+stacks — noted in `deployment-guide.md` and `../backend/deployment-guide.md`.
+
+The backend stack reads this one's outputs through `terraform_remote_state`
+and never modifies resources listed as owned by `terraform/` here. Apply
+order is this stack first; destroy order is the reverse, because the backend
+stack holds an ingress rule on `aws_security_group.redis`.
 
 ## Cross-cutting env contract
 
@@ -138,7 +144,7 @@ Keep these names identical across `terraform/ecs.tf` (task def env),
 
 - Change infra shape → `terraform/` (then read that dir's `AGENTS.md`).
 - Change transcode ladder or progress semantics → `transcoder/`.
-- Add or change an API → `backend/app/routers/`.
+- Add or change an API → `../backend/app/routers/` (outside this dir).
 - Change how S3 events fan out to Fargate → `lambda/` +
   `terraform/lambda.tf`.
 
