@@ -1,4 +1,4 @@
-"""ORM models for the users and videos tables.
+"""ORM models for the users, videos, and transcode_results tables.
 
 The schema itself is owned by the Alembic revisions in migrations/versions;
 keep these models and the latest revision in step (`alembic check` fails if
@@ -79,8 +79,11 @@ class Video(Base):
     # transcoder's VIDEO_ID, which names the Redis progress key.
     s3_key: Mapped[str] = mapped_column(String(500), unique=True)
     thumbnail_s3_key: Mapped[str] = mapped_column(String(500))
-    # Key in the processed bucket; the API serves it through CloudFront.
+    # Keys in the processed bucket; the API serves them through CloudFront.
+    # The HLS master playlist shares the DASH segments. It is null for videos
+    # transcoded before the transcoder wrote HLS.
     dash_manifest_s3_key: Mapped[str | None] = mapped_column(String(500))
+    hls_manifest_s3_key: Mapped[str | None] = mapped_column(String(500))
     visibility: Mapped[Visibility] = mapped_column(
         Enum(Visibility, name="visibility_enum"),
         default=Visibility.PUBLIC, server_default=Visibility.PUBLIC.value, index=True,
@@ -102,3 +105,22 @@ class Video(Base):
     updated_at: Mapped[datetime] = _updated_at()
 
     user: Mapped[User] = relationship(back_populates="videos")
+
+
+class TranscodeResult(Base):
+    """A terminal transcoder message (COMPLETED or FAILED) that arrived
+    before its videos row was saved. Owned by the completion poller: it
+    parks the result here, applies it once the row exists, and prunes
+    results whose row never appears."""
+
+    __tablename__ = "transcode_results"
+
+    raw_key: Mapped[str] = mapped_column(String(500), primary_key=True)
+    status: Mapped[VideoStatus] = mapped_column(Enum(VideoStatus, name="status_enum"))
+    dash_manifest_s3_key: Mapped[str | None] = mapped_column(String(500))
+    hls_manifest_s3_key: Mapped[str | None] = mapped_column(String(500))
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+    )

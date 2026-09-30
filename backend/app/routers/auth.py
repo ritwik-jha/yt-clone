@@ -10,7 +10,7 @@ import logging
 from typing import NoReturn, Optional
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -19,10 +19,11 @@ from app.config import get_settings
 from app.crypto import secret_hash
 from app.db import get_db
 from app.deps import ACCESS_COOKIE, get_current_user
+from app.errors import APIError
 from app.models import User
 from app.schemas import (
-    LoginRequest, MessageResponse, SignUpRequest, UserProfileResponse,
-    VerifyOTPRequest,
+    EmailRequest, LoginRequest, MessageResponse, ResetPasswordRequest,
+    SignUpRequest, UserProfileResponse, VerifyOTPRequest,
 )
 from app.users import upsert_user
 
@@ -45,20 +46,28 @@ def _hash(email: str) -> str:
     return secret_hash(email, s.cognito_client_id, s.cognito_client_secret)
 
 
+# Shared entries for the `known` maps below.
+_INVALID_PARAMETER = {"InvalidParameterException": (400, "invalid_parameter", None)}
+_CODE_DELIVERY = {
+    "CodeDeliveryFailureException": (503, "code_delivery_failed", "Could not send the code, try again later"),
+}
+
+
 def _raise_cognito(
-    operation: str, exc: Exception, known: dict[str, tuple[int, Optional[str]]],
+    operation: str, exc: Exception, known: dict[str, tuple[int, str, Optional[str]]],
 ) -> NoReturn:
-    """Map a Cognito failure to an HTTP error. A None detail passes Cognito's
-    own message through (it is written for end users)."""
+    """Map a Cognito failure to an APIError. `known` maps a Cognito error code
+    to (status, API code, detail); a None detail passes Cognito's own message
+    through (it is written for end users)."""
     error = exc.response.get("Error", {}) if isinstance(exc, ClientError) else {}
-    code = error.get("Code", type(exc).__name__)
-    if code in known:
-        status_code, detail = known[code]
-        raise HTTPException(status_code, detail or error.get("Message", code)) from None
-    if code in _THROTTLED:
-        raise HTTPException(429, "Too many attempts, try again later") from None
-    log.error("Cognito %s failed: %s", operation, code)
-    raise HTTPException(500, "Identity provider error") from None
+    cognito_code = error.get("Code", type(exc).__name__)
+    if cognito_code in known:
+        status_code, code, detail = known[cognito_code]
+        raise APIError(status_code, code, detail or error.get("Message", cognito_code)) from None
+    if cognito_code in _THROTTLED:
+        raise APIError(429, "too_many_attempts", "Too many attempts, try again later") from None
+    log.error("Cognito %s failed: %s", operation, cognito_code)
+    raise APIError(500, "identity_provider_error", "Identity provider error") from None
 
 
 def _set_cookie(response: Response, name: str, value: str, max_age: int, path: str) -> None:
@@ -93,9 +102,10 @@ def signup(data: SignUpRequest, db: Session = Depends(get_db)):
         )
     except (ClientError, BotoCoreError) as exc:
         _raise_cognito("SignUp", exc, {
-            "UsernameExistsException":   (400, "An account with this email already exists"),
-            "InvalidPasswordException":  (400, None),
-            "InvalidParameterException": (400, None),
+            "UsernameExistsException":  (400, "email_exists", "An account with this email already exists"),
+            "InvalidPasswordException": (400, "invalid_password", None),
+            **_INVALID_PARAMETER,
+            **_CODE_DELIVERY,
         })
 
     try:
@@ -110,7 +120,7 @@ def signup(data: SignUpRequest, db: Session = Depends(get_db)):
             cognito().admin_delete_user(UserPoolId=s.cognito_user_pool_id, Username=data.email)
         except (ClientError, BotoCoreError) as exc:
             log.error("rollback AdminDeleteUser failed: %s", type(exc).__name__)
-        raise HTTPException(500, "Could not create the user profile, please try again") from None
+        raise APIError(500, "profile_create_failed", "Could not create the user profile, please try again") from None
 
     return MessageResponse(message="Registration successful. Check your email for the verification code.")
 
@@ -127,13 +137,80 @@ def verify_otp(data: VerifyOTPRequest):
         )
     except (ClientError, BotoCoreError) as exc:
         _raise_cognito("ConfirmSignUp", exc, {
-            "CodeMismatchException":     (400, "Invalid verification code"),
-            "ExpiredCodeException":      (400, "Verification code expired"),
-            "NotAuthorizedException":    (400, None),  # e.g. already confirmed
-            "InvalidParameterException": (400, None),
-            "UserNotFoundException":     (404, "User not found"),
+            "CodeMismatchException":  (400, "code_mismatch", "Invalid verification code"),
+            "ExpiredCodeException":   (400, "code_expired", "Verification code expired"),
+            "NotAuthorizedException": (400, "not_authorized", None),  # e.g. already confirmed
+            "UserNotFoundException":  (404, "user_not_found", "User not found"),
+            **_INVALID_PARAMETER,
         })
     return MessageResponse(message="Account verified. You can log in now.")
+
+
+@router.post("/resend-otp", response_model=MessageResponse)
+def resend_otp(data: EmailRequest):
+    s = get_settings()
+    try:
+        cognito().resend_confirmation_code(
+            ClientId=s.cognito_client_id,
+            Username=data.email,
+            SecretHash=_hash(data.email),
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # Cognito's own limit on resends surfaces as LimitExceeded (429).
+        _raise_cognito("ResendConfirmationCode", exc, {
+            "UserNotFoundException": (404, "user_not_found", "User not found"),
+            **_INVALID_PARAMETER,  # e.g. already confirmed
+            **_CODE_DELIVERY,
+        })
+    return MessageResponse(message="Verification code sent. Check your email.")
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+def forgot_password(data: EmailRequest):
+    s = get_settings()
+    try:
+        cognito().forgot_password(
+            ClientId=s.cognito_client_id,
+            Username=data.email,
+            SecretHash=_hash(data.email),
+        )
+    except ClientError as exc:
+        # The same answer whether or not the account exists, so this route
+        # cannot be used to probe for registered emails.
+        if exc.response.get("Error", {}).get("Code") != "UserNotFoundException":
+            _raise_cognito("ForgotPassword", exc, {
+                "NotAuthorizedException": (400, "not_authorized", None),
+                **_INVALID_PARAMETER,  # e.g. the email was never verified
+                **_CODE_DELIVERY,
+            })
+    except BotoCoreError as exc:
+        _raise_cognito("ForgotPassword", exc, {})
+    return MessageResponse(message="If an account exists for this email, a reset code has been sent.")
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+def reset_password(data: ResetPasswordRequest):
+    s = get_settings()
+    try:
+        cognito().confirm_forgot_password(
+            ClientId=s.cognito_client_id,
+            Username=data.email,
+            ConfirmationCode=data.otp,
+            Password=data.new_password,
+            SecretHash=_hash(data.email),
+        )
+    except (ClientError, BotoCoreError) as exc:
+        _raise_cognito("ConfirmForgotPassword", exc, {
+            "CodeMismatchException":    (400, "code_mismatch", "Invalid verification code"),
+            "ExpiredCodeException":     (400, "code_expired", "Verification code expired"),
+            "InvalidPasswordException": (400, "invalid_password", None),
+            "NotAuthorizedException":   (400, "not_authorized", None),
+            # Reported like a wrong code so the route does not reveal which
+            # emails are registered.
+            "UserNotFoundException":    (400, "code_mismatch", "Invalid verification code"),
+            **_INVALID_PARAMETER,
+        })
+    return MessageResponse(message="Password reset. You can log in now.")
 
 
 @router.post("/login", response_model=MessageResponse)
@@ -153,15 +230,18 @@ def login(data: LoginRequest, response: Response):
         # With prevent_user_existence_errors on the app client, Cognito
         # reports an unknown email as NotAuthorized, so 404 is rare.
         _raise_cognito("InitiateAuth", exc, {
-            "NotAuthorizedException":         (400, "Incorrect email or password"),
-            "UserNotConfirmedException":      (400, "Account not verified"),
-            "PasswordResetRequiredException": (400, "Password reset required"),
-            "UserNotFoundException":          (404, "Account does not exist"),
+            "NotAuthorizedException":         (400, "incorrect_credentials", "Incorrect email or password"),
+            "UserNotConfirmedException":      (400, "user_not_confirmed", "Account not verified"),
+            "PasswordResetRequiredException": (400, "password_reset_required", "Password reset required"),
+            "UserNotFoundException":          (404, "user_not_found", "Account does not exist"),
         })
 
     result = auth.get("AuthenticationResult")
     if not result:
-        raise HTTPException(400, f"Unsupported sign-in challenge: {auth.get('ChallengeName', 'unknown')}")
+        raise APIError(
+            400, "unsupported_challenge",
+            f"Unsupported sign-in challenge: {auth.get('ChallengeName', 'unknown')}",
+        )
 
     _set_cookie(response, ACCESS_COOKIE, result["AccessToken"], s.access_cookie_max_age, "/")
     _set_cookie(response, REFRESH_COOKIE, result["RefreshToken"], s.refresh_cookie_max_age, REFRESH_PATH)
@@ -172,7 +252,7 @@ def login(data: LoginRequest, response: Response):
 def refresh(request: Request, response: Response):
     token = request.cookies.get(REFRESH_COOKIE)
     if not token:
-        raise HTTPException(401, "Missing refresh token")
+        raise APIError(401, "missing_refresh_token", "Missing refresh token")
 
     s = get_settings()
     try:
@@ -184,10 +264,11 @@ def refresh(request: Request, response: Response):
             ClientSecret=s.cognito_client_secret,
         )
     except (ClientError, BotoCoreError) as exc:
+        invalid = (401, "refresh_token_invalid", "Refresh token expired or revoked")
         _raise_cognito("GetTokensFromRefreshToken", exc, {
-            "NotAuthorizedException":     (401, "Refresh token expired or revoked"),
-            "RefreshTokenReuseException": (401, "Refresh token expired or revoked"),
-            "UserNotFoundException":      (401, "Refresh token expired or revoked"),
+            "NotAuthorizedException":     invalid,
+            "RefreshTokenReuseException": invalid,
+            "UserNotFoundException":      invalid,
         })
 
     result = resp["AuthenticationResult"]

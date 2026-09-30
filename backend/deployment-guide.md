@@ -27,7 +27,7 @@ pipeline resources, apart from adding one ingress rule to the Redis SG.
 | ECS cluster `video-backend` | `ecs.tf` |
 | API: `aws_ecs_express_gateway_service` (ALB, target group, listener rule, cert, autoscaling, SGs all managed by ECS) | `ecs.tf` |
 | Poller: task definition + `aws_ecs_service` | `ecs.tf` |
-| RDS PostgreSQL instance (`users`, `videos`) + subnet group; its master password is an RDS-managed Secrets Manager secret | `database.tf` |
+| RDS PostgreSQL instance (`users`, `videos`, `transcode_results`) + subnet group; its master password is an RDS-managed Secrets Manager secret | `database.tf` |
 | Five IAM roles: API execution, API task, poller execution, poller task, Express Mode infrastructure | `iam.tf` |
 | API security group (container port from the VPC CIDR) and poller security group (egress only) | `network.tf` |
 | Database security group (5432 from the API and poller SGs only) | `network.tf` |
@@ -46,14 +46,14 @@ and the CloudFront distribution in front of the processed bucket.
 | Role | Assumed by | Can do |
 |---|---|---|
 | `video-backend-api-execution` | ECS agent, API tasks | Pull the backend image, write logs, read the Cognito secret parameter |
-| `video-backend-api-task` | API code | Read the database secret, Cognito `AdminDeleteUser` (rolls back a signup whose `users` insert failed), `s3:PutObject` for presigned uploads |
+| `video-backend-api-task` | API code | Read the database secret, Cognito `AdminDeleteUser` (rolls back a signup whose `users` insert failed), `s3:PutObject` for presigned uploads, `s3:DeleteObject` / `s3:ListBucket` to remove a deleted video's raw, thumbnail, and processed objects |
 | `video-backend-poller-execution` | ECS agent, poller tasks | Pull the backend image, write logs |
 | `video-backend-poller-task` | Poller code | Read the database secret, drain the completion queue |
 | `video-backend-express-infrastructure` | ECS Express Mode | Manage the API's ALB, target group, SGs, ACM cert, autoscaling (`AmazonECSInfrastructureRoleforExpressGatewayServices`) |
 
 The poller can't read the Cognito secret. The other Cognito calls the API
-makes (sign-up, login, refresh, revoke, `GetUser`) are public APIs that IAM
-doesn't evaluate. Both services connect to PostgreSQL as the same master
+makes (sign-up, resend code, forgot and reset password, login, refresh,
+revoke, `GetUser`) are public APIs that IAM doesn't evaluate. Both services connect to PostgreSQL as the same master
 user, so the rule that only the poller writes processing status is enforced
 in code, not by the database.
 
@@ -200,17 +200,22 @@ pipeline smoke test, has no `videos` row and never shows up here):
    while the Fargate transcoder runs, then reports `COMPLETED` and 100.
 5. `GET /video/{id}` returns `manifest_url`
    (`https://dxxxx.cloudfront.net/<uuid from s3_key>/dash/manifest.mpd`),
-   `thumbnail_url`, and `duration_seconds`. A PUBLIC video also appears in
-   `GET /video/feed`.
+   `hls_url` (`.../dash/master.m3u8`), `thumbnail_url`, and
+   `duration_seconds`. A PUBLIC video also appears in `GET /video/feed`.
+6. `POST /video/{id}/view` returns 204 and `views_count` goes up by one
+   (a cached `GET /video/{id}` may show the old count until its TTL).
 
-Point a DASH player (dash.js, Shaka) at `manifest_url`. CloudFront serves
-the manifest and segments from the private bucket via OAC, with CORS headers
-added at the edge. Thumbnails come from this stack's own distribution the
-same way.
+Point a DASH player (dash.js, Shaka, ExoPlayer) at `manifest_url`, or
+AVPlayer / Safari at `hls_url`; both manifests reference the same fMP4
+segments. CloudFront serves them from the private bucket via OAC, with CORS
+headers added at the edge. Thumbnails come from this stack's own
+distribution the same way. `hls_url` is null for videos transcoded before
+the transcoder wrote HLS; re-upload them to get one.
 
-If a video stays `PENDING`, check the poller log stream: `no row yet`
-means the completion message beat the save and will redeliver, and a
-message that never finds its row ends up in the completion DLQ.
+If a video stays `PENDING`, check the poller log stream. `no row yet ...
+parked` means the result beat the save; the poller applies it on its next
+loop once the row exists (`applied parked`). A parked result whose row
+never appears is pruned after 7 days.
 
 ---
 
@@ -235,6 +240,7 @@ before applying.
 | Restart the poller | `aws ecs update-service --cluster video-backend --service video-backend-poller --force-new-deployment` |
 | Add a schema change | `alembic revision -m "<change>"` in `backend/`, edit it and `app/models.py`, then ship new code (the API applies it on start) |
 | Stop the poller | `terraform apply -var poller_desired_count=0` |
+| Redrive the completion DLQ | `aws sqs start-message-move-task --source-arn "$(aws sqs get-queue-attributes --queue-url "$(terraform -chdir=../../IAC/terraform output -raw completion_dlq_url)" --attribute-names QueueArn --query Attributes.QueueArn --output text)"` (moves messages back to the completion queue) |
 
 Use a new image tag per deploy. Re-pushing `latest` doesn't change the task
 definition, so Terraform sees no diff and nothing restarts.
@@ -295,4 +301,18 @@ so run `aws ecr batch-delete-image` if the repo blocks the destroy.
   aren't retried. With Redis down, progress reads return 0 and
   `GET /video/{id}` reads PostgreSQL directly.
 - **Single poller.** `poller_desired_count = 1` is intentional. More
-  replicas are safe (the guarded UPDATEs are idempotent) but unnecessary.
+  replicas are safe (the guarded UPDATEs and the parked-result upsert are
+  idempotent) but unnecessary.
+- **Deletes are not instant at the edge.** `DELETE /video/{id}` removes the
+  row at once and the S3 objects right after the response, but CloudFront
+  keeps serving cached manifests, segments, and thumbnails until their TTL
+  runs out. S3 failures are logged (`deleting s3://...`) and leave orphaned
+  objects; the row is gone either way.
+- **Deleting mid-transcode.** If a video is deleted while the transcoder is
+  still running, the transcoder keeps writing to the processed bucket after
+  the cleanup ran, and its completion message is parked and pruned 7 days
+  later. The processed objects under that `<uuid>/` prefix are left behind;
+  remove them with `aws s3 rm --recursive`.
+- **Transcoder and backend versions.** The poller accepts completion
+  messages with or without `hls_manifest_uri`, so the pipeline's transcoder
+  image and this stack can be deployed in either order.

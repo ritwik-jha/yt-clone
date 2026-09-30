@@ -30,16 +30,18 @@ backend/
 │   ├── config.py               pydantic-settings; env first, then .env
 │   ├── clients.py              lazy singletons: cognito, s3, sqs, redis
 │   ├── db.py                   engine + sessions; password from DB_PASSWORD or the RDS secret
-│   ├── models.py               users + videos ORM models, status/visibility enums
+│   ├── models.py               users + videos + transcode_results ORM models, enums
 │   ├── users.py                upsert_user, shared by signup and get_current_user
 │   ├── cache.py                video:meta:<id> Redis hash cache for GET /video/{id}
 │   ├── crypto.py               HMAC-SHA256 secret_hash for Cognito app clients
 │   ├── deps.py                 get_identity / get_optional_identity / get_current_user
+│   ├── errors.py               APIError: HTTPException carrying a stable `code`
 │   ├── schemas.py              pydantic request/response models
 │   ├── routers/
-│   │   ├── auth.py             /auth/{signup,verify-otp,login,refresh,logout,me}
+│   │   ├── auth.py             /auth/{signup,verify-otp,resend-otp,forgot-password,
+│   │   │                         reset-password,login,refresh,logout,me}
 │   │   ├── upload.py           /upload/video/{url, url/thumbnail, save}
-│   │   └── video.py            /video/{feed, mine, {id}, {id}/progress}
+│   │   └── video.py            /video/{feed, mine, {id}, {id}/progress, {id}/view}
 │   └── workers/
 │       └── completion_poller.py  SQS -> PostgreSQL drainer (its own container)
 ├── migrations/                 Alembic env.py + versions/ (schema source of truth)
@@ -62,6 +64,9 @@ backend/
 |---|---|---|---|
 | POST | `/auth/signup` | – | Cognito `sign_up` + insert `users` (Cognito user deleted if the insert fails) |
 | POST | `/auth/verify-otp` | – | Cognito `confirm_sign_up` |
+| POST | `/auth/resend-otp` | – | Cognito `resend_confirmation_code` |
+| POST | `/auth/forgot-password` | – | Cognito `forgot_password`; same answer whether or not the account exists |
+| POST | `/auth/reset-password` | – | Cognito `confirm_forgot_password` (code + new password) |
 | POST | `/auth/login` | – | Cognito `initiate_auth`, sets HTTPOnly cookies |
 | POST | `/auth/refresh` | refresh cookie | Cognito `get_tokens_from_refresh_token`, resets the access cookie |
 | POST | `/auth/logout` | – | Cognito `revoke_token` on the refresh cookie if sent, clears cookies |
@@ -72,14 +77,25 @@ backend/
 | GET  | `/video/feed` | – | PUBLIC + COMPLETED, paginated (`page`, `limit` ≤ 50), newest first |
 | GET  | `/video/mine` | cookie | Caller's videos, any status, paginated |
 | GET  | `/video/{video_id}` | optional | `video:meta` cache, else PostgreSQL; 404 unless viewable |
+| PATCH | `/video/{video_id}` | cookie, owner | Edit title / description / visibility; drops the `video:meta` key |
+| DELETE | `/video/{video_id}` | cookie, owner | Delete the row (204), drop the `video:meta` key, then remove the S3 objects in the background |
 | GET  | `/video/{video_id}/progress` | optional | Redis `GET video:progress:<stem of s3_key>` + row status |
+| POST | `/video/{video_id}/view` | optional | Atomic `views_count + 1` (204); 409 `video_not_ready` unless COMPLETED |
 | GET  | `/healthz` | – | Liveness |
 
 "Optional" auth: a COMPLETED video that is PUBLIC or UNLISTED is readable by
 anyone; a PRIVATE or unfinished one only by its owner (everyone else gets
-404). The caller is resolved only when ownership decides the answer.
-Validation errors are 400 (`main.py` remaps FastAPI's 422); a database
-`OperationalError` is 503.
+404). The caller is resolved only when ownership decides the answer. PATCH
+and DELETE answer 404 to anyone but the owner, for the same reason.
+
+Every error body is `{"detail": ..., "code": ...}`. `code` is a stable
+snake_case string clients branch on (`user_not_confirmed`, `code_expired`,
+`video_not_found`, ...); `detail` is for people and may change. Raise
+`app.errors.APIError(status, code, detail)` rather than a bare
+`HTTPException`; `main.py` fills in `not_found` / `method_not_allowed` /
+`error` for anything that isn't one. Validation errors are 400 with code
+`validation_error` and FastAPI's error list as `detail` (`main.py` remaps
+the 422); a database `OperationalError` is 503 `database_unavailable`.
 
 ## Config
 
@@ -93,8 +109,9 @@ All config is env-driven via `pydantic_settings.BaseSettings`.
   previous file / environment / `.env.example`.
 
 Settings default to empty, and each entrypoint calls `Settings.require(...)`
-for the ones it needs: `main.py` for Cognito, buckets, Redis,
-`CLOUDFRONT_DOMAIN`, and `THUMBNAILS_CDN_DOMAIN`; the poller for
+for the ones it needs: `main.py` for Cognito, the raw / thumbnails /
+processed buckets, Redis, `CLOUDFRONT_DOMAIN`, and `THUMBNAILS_CDN_DOMAIN`;
+the poller for
 `COMPLETION_QUEUE_URL`. Both call `Settings.require_database()` (host, name,
 user, and `DB_PASSWORD` or `DB_SECRET_ARN`). A missing value fails at
 startup, not on first request.
@@ -125,19 +142,30 @@ only. The local `.env` is gitignored, written mode 600, and excluded by
   Status is written in two places only:
   - `POST /upload/video/save` inserts the row with `status=PENDING`.
   - `completion_poller` applies `PROCESSING`, `COMPLETED` (+
-    `dash_manifest_s3_key`, `duration_seconds`) and `FAILED` with guarded
-    UPDATEs.
-- **URLs are derived, not stored.** Responses build `manifest_url` from
-  `CLOUDFRONT_DOMAIN` + `dash_manifest_s3_key` and `thumbnail_url` from
-  `THUMBNAILS_CDN_DOMAIN` + `thumbnail_s3_key` at read time.
+    `dash_manifest_s3_key`, `hls_manifest_s3_key`, `duration_seconds`) and
+    `FAILED` with guarded UPDATEs.
+
+  The owner may edit title, description, and visibility (`PATCH`) and delete
+  the row (`DELETE`); `POST /video/{id}/view` increments `views_count`
+  without touching `updated_at`.
+- **PostgreSQL `transcode_results`** — owned by the poller. Terminal results
+  whose `videos` row did not exist yet, keyed by `raw_key`. See "Poller
+  worker". Nothing in the API reads or writes it.
+- **URLs are derived, not stored.** Responses build `manifest_url` (DASH)
+  and `hls_url` from `CLOUDFRONT_DOMAIN` + `dash_manifest_s3_key` /
+  `hls_manifest_s3_key`, and `thumbnail_url` from `THUMBNAILS_CDN_DOMAIN` +
+  `thumbnail_s3_key`, at read time. `hls_url` is null for videos transcoded
+  before HLS output existed.
 - **Redis `video:progress:<stem>`** — read-only for the backend.
   Transcoder is the sole writer. Never mint progress values in the
   backend.
 - **Redis `video:meta:<video_id>`** — owned by the API. A hash of the
   detail response, written on a `GET /video/{id}` miss with a TTL, only for
-  videos anyone may watch. Nothing changes a COMPLETED video today, so
-  nothing invalidates the key; if you add an edit or delete path, delete the
-  key there too. Every Redis error is logged and falls back to PostgreSQL.
+  videos anyone may watch. `PATCH` and `DELETE` delete the key after their
+  commit (`cache.drop_video`); any new path that changes a video's detail
+  must do the same. `views_count` is not invalidated, so a cached detail can
+  lag the count by up to the TTL. Every Redis error is logged and falls back
+  to PostgreSQL.
 
 ## Auth flow (mirror of `../IAC/deployment-guide.md` and `../docs/auth-implementation-guide.md`)
 
@@ -159,22 +187,28 @@ only. The local `.env` is gitignored, written mode 600, and excluded by
   | Message status | Guard | Also sets |
   |---|---|---|
   | `processing` | only if the row is `PENDING` | – |
-  | `completed` | none | `dash_manifest_s3_key` (key parsed from `manifest_uri`), `duration_seconds` |
+  | `completed` | none | `dash_manifest_s3_key` (from `manifest_uri`), `hls_manifest_s3_key` (from `hls_manifest_uri`, kept if absent), `duration_seconds` |
   | `failed` | only if the row is not `COMPLETED` | – (the error is logged) |
 
   SQS delivers at least once and out of order; the guards make replays and
-  late messages no-ops, so a status never moves backwards.
+  late messages no-ops, so a status never moves backwards. Messages from a
+  transcoder that predates HLS have no `hls_manifest_uri`; that is valid.
 
-- **No row yet** (the client hasn't called `/upload/video/save`): a
-  `processing` message is dropped; a `completed` / `failed` one raises
-  `RowNotSaved` and stays on the queue to redeliver, reaching the DLQ only
-  if the row never appears.
-- Clients play `manifest_url`; the processed bucket is private and
-  CloudFront reads it through OAC.
+- **No row yet** (the client hasn't called `/upload/video/save`, or the
+  video was deleted mid-transcode): a `processing` message is dropped. A
+  `completed` / `failed` one is parked in `transcode_results` (upsert on
+  `raw_key`; `COMPLETED` is never replaced by `FAILED`) and the message is
+  deleted.
+- **Reconcile** — at the top of every loop iteration, in its own session:
+  each parked result whose row now exists goes through the same guarded
+  UPDATE and is deleted; parked results older than `PARKED_RESULT_TTL`
+  (7 days) are pruned. A failure here is logged and the loop carries on.
+- Clients play `manifest_url` (DASH) or `hls_url`; the processed bucket is
+  private and CloudFront reads it through OAC.
 - On success → `delete_message`.
-- On any exception → **do NOT** delete; SQS redelivers after visibility
-  timeout, DLQ catches poison messages after `max_receive_count` (3 in
-  terraform default).
+- On any exception (bad JSON, unknown status, database error) → **do NOT**
+  delete; SQS redelivers after visibility timeout, DLQ catches poison
+  messages after `max_receive_count` (3 in terraform default).
 - SIGINT/SIGTERM handled cleanly; the task definition sets a 30s
   `stopTimeout` (compose: `stop_grace_period`) so an in-flight batch finishes
   instead of going invisible until the timeout lapses.
@@ -186,12 +220,15 @@ Defined in `terraform/iam.tf`, not by hand. Each service has its own pair:
 - **API execution role** — ECR pull, logs on `/video-backend`,
   `ssm:GetParameters` on the Cognito client-secret parameter.
 - **API task role** — `secretsmanager:GetSecretValue` on the RDS master
-  secret; `cognito-idp:{SignUp, ConfirmSignUp, InitiateAuth,
+  secret; `cognito-idp:{SignUp, ConfirmSignUp, ResendConfirmationCode,
+  ForgotPassword, ConfirmForgotPassword, InitiateAuth,
   GetTokensFromRefreshToken, RevokeToken, GetUser}` on the user pool (IAM
   doesn't evaluate these public APIs; listed for documentation);
   `cognito-idp:AdminDeleteUser` to roll back a signup whose `users` insert
   failed; `s3:PutObject` on `raw-bucket/videos/*` and
-  `thumbnails-bucket/thumbnails/*` (the presigned URLs' authority).
+  `thumbnails-bucket/thumbnails/*` (the presigned URLs' authority);
+  `s3:DeleteObject` on those same prefixes and the whole processed bucket,
+  plus `s3:ListBucket` on the processed bucket, for `DELETE /video/{id}`.
 - **Poller execution role** — ECR pull and logs only.
 - **Poller task role** — `secretsmanager:GetSecretValue` on the RDS master
   secret; `sqs:{ReceiveMessage, DeleteMessage, GetQueueAttributes}` on the
@@ -200,7 +237,8 @@ Defined in `terraform/iam.tf`, not by hand. Each service has its own pair:
   used by ECS to manage the API's ALB, cert, SGs, and autoscaling.
 
 The API server itself never uploads to S3; the presigned URL delegates
-its permission to the client. Don't widen these policies — add a scoped
+its permission to the client. Its only direct S3 writes are the deletes
+behind `DELETE /video/{id}`. Don't widen these policies — add a scoped
 statement to the one role that needs it.
 
 ## Network
@@ -230,6 +268,9 @@ statement to the one role that needs it.
 - Add a new endpoint → new function in the matching `routers/*.py`, add
   request/response models to `schemas.py`, register the router in
   `main.py` if it's a new file.
+- Errors → `APIError(status, code, detail)` from `app/errors.py`. A `code`
+  is part of the API contract (the Flutter client maps on it): add new ones
+  freely, never rename or reuse one.
 - Never inline `boto3.client(...)` — go through `clients.py` so tests
   and cold-start behavior stay consistent.
 - Never write video status from HTTP handlers except the initial

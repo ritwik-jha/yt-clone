@@ -53,7 +53,7 @@ PostgreSQL) belongs to `../../backend/terraform`, not here.
   reads it. Keep state access as restricted as the `.env` file itself.
   The same value is written to an SSM SecureString, which is what the ECS
   API task reads.
-- **The processed bucket is private.** Clients read DASH output only through
+- **The processed bucket is private.** Clients read DASH and HLS output only through
   CloudFront. The bucket policy trusts `cloudfront.amazonaws.com` conditioned
   on this distribution's ARN. Don't add public-read or a website endpoint.
 

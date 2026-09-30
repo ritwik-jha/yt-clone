@@ -2,8 +2,9 @@
 
 Ephemeral Fargate container: one Fargate task per video. Grabs a Redis
 lock, reports "processing", downloads the raw MP4, probes its duration,
-runs ffmpeg to produce a 3-rendition MPEG-DASH ladder, uploads to the
-processed bucket, sends a completion message to SQS, and exits.
+runs ffmpeg to produce a 3-rendition ladder packaged as both MPEG-DASH and
+HLS (one set of fMP4 segments, two manifests), uploads to the processed
+bucket, sends a completion message to SQS, and exits.
 
 ## Files
 
@@ -28,17 +29,25 @@ processed bucket, sends a completion message to SQS, and exits.
    Progress = 5 → 25.
 5. **Probe duration** — `ffprobe` on the input, rounded to whole seconds.
    Non-fatal: `None` if ffprobe fails or reports no duration.
-6. **ffmpeg** — 3-rendition x264 ladder (1080p / 720p / 480p) + AAC audio,
-   DASH-muxed with 4s segments, template-based init/media naming.
-   Progress = 80.
+6. **ffmpeg** — 3-rendition x264 ladder (`LADDER`: 1920x1080 / 1280x720 /
+   854x480 bounding boxes) + AAC audio, DASH-muxed with 4s segments,
+   template-based init/media naming. Each rung scales with
+   `force_original_aspect_ratio=decrease:force_divisible_by=2`, so the
+   source aspect ratio is kept: a portrait 1080x1920 clip comes out
+   608x1080 / 404x720 / 270x480, never stretched. ffmpeg applies rotation
+   metadata before the filter, so phone clips recorded sideways land
+   portrait. `-hls_playlist 1 -hls_master_name master.m3u8` makes the same
+   muxer write `master.m3u8` plus one `media_<n>.m3u8` per stream over the
+   same segments. Progress = 80.
 7. **Upload** every file under `/tmp/transcode/<VIDEO_ID>/dash/` to
    `s3://<PROCESSED_BUCKET>/<VIDEO_ID>/dash/*` with correct content-types
-   (`application/dash+xml` for `.mpd`, `video/iso.segment` for `.m4s`).
-   Progress = 95.
-8. **Send completion message** (`status=completed`, with `manifest_uri`
-   and `duration_seconds`) to `COMPLETION_QUEUE_URL`. Progress = 100. Any
-   failure in steps 4–7 sends `status=failed` with `error` instead, and the
-   task exits non-zero.
+   (`application/dash+xml` for `.mpd`, `application/vnd.apple.mpegurl` for
+   `.m3u8`, `video/iso.segment` for `.m4s`). A missing `master.m3u8` is a
+   failure. Progress = 95.
+8. **Send completion message** (`status=completed`, with `manifest_uri`,
+   `hls_manifest_uri`, and `duration_seconds`) to `COMPLETION_QUEUE_URL`.
+   Progress = 100. Any failure in steps 4–7 sends `status=failed` with
+   `error` instead, and the task exits non-zero.
 9. **Release lock** via compare-and-delete Lua (releases only if we still
    own it). Runs in `finally`.
 
@@ -66,6 +75,7 @@ Sent to `COMPLETION_QUEUE_URL` via `sqs.send_message` (`send_status()`):
   "raw_key":          "<S3_KEY>",
   "status":           "processing" | "completed" | "failed",
   "manifest_uri":     "s3://<PROCESSED_BUCKET>/<VIDEO_ID>/dash/manifest.mpd",
+  "hls_manifest_uri": "s3://<PROCESSED_BUCKET>/<VIDEO_ID>/dash/master.m3u8",
   "duration_seconds": <int, or null>,
   "error":            "<empty unless failed>",
   "task_token":       "<lock owner token>",
@@ -73,10 +83,14 @@ Sent to `COMPLETION_QUEUE_URL` via `sqs.send_message` (`send_status()`):
 }
 ```
 
-`manifest_uri` and `duration_seconds` are set only on `completed`. The
-backend poller matches the `videos` row on `raw_key` (the row's `s3_key`)
-and never moves a status backwards, so duplicate or out-of-order messages
-are harmless.
+`manifest_uri`, `hls_manifest_uri`, and `duration_seconds` are set only on
+`completed`. The backend poller matches the `videos` row on `raw_key` (the
+row's `s3_key`) and never moves a status backwards, so duplicate or
+out-of-order messages are harmless. A terminal message that arrives before
+the row exists is parked by the poller and applied once the row is saved.
+Adding a field is safe (the poller ignores unknown keys and tolerates a
+missing `hls_manifest_uri`); renaming or removing one needs a backend change
+first.
 
 Message attributes: `video_id`, `status` (both String), for filtering and
 debugging; the poller reads the JSON body.

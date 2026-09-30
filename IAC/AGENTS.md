@@ -20,7 +20,7 @@ IAC/
 │                  events, invokes ecs:RunTask with per-message env
 │                  overrides. Partial-batch failure reporting.
 ├── transcoder/    Fargate container. Redis lock -> "processing" SQS ->
-│                  download S3 -> ffprobe duration -> ffmpeg DASH ladder
+│                  download S3 -> ffprobe duration -> ffmpeg DASH + HLS ladder
 │                  -> upload S3 -> completion SQS.
 │                  Writes progress % to Redis after each stage.
 └── deployment-guide.md   Step-by-step deploy walkthrough.
@@ -48,8 +48,8 @@ Client --presigned PUT--> S3 raw bucket
                     +--(1) SET video:lock:<id> NX EX 1800  --> ElastiCache Redis
                     +--(2) SendMessage status=processing   --> SQS completion queue
                     +--(3) SET video:progress:<id> 5..100  --> ElastiCache Redis
-                    +--(4) ffprobe duration + ffmpeg DASH  --> local /tmp
-                    +--(5) upload manifest+segments        --> S3 processed bucket
+                    +--(4) ffprobe + ffmpeg DASH/HLS       --> local /tmp
+                    +--(5) upload manifests+segments       --> S3 processed bucket
                     +--(6) SendMessage status=completed    --> SQS completion queue
                                                                     |
                                                                     | long-poll
@@ -63,7 +63,7 @@ Client --presigned PUT--> S3 raw bucket
 Client --GET /video/{id}/progress--------------------> FastAPI backend --GET video:progress:<id> --> Redis
                                                                     +-> SELECT --> PostgreSQL
 
-Client --GET manifest_url--> CloudFront --OAC--> S3 processed bucket
+Client --GET manifest_url | hls_url--> CloudFront --OAC--> S3 processed bucket
 ```
 
 ## Key design invariants
@@ -98,12 +98,12 @@ Client --GET manifest_url--> CloudFront --OAC--> S3 processed bucket
 |---|---|---|
 | VPC + subnets + IGW + workload SG + redis SG | `terraform/network.tf` | Fargate, Redis |
 | S3 raw + processed buckets | `terraform/storage.tf` | Client (presigned PUT), transcoder, CloudFront |
-| CloudFront + OAC + processed bucket policy | `terraform/cloudfront.tf` | Client (DASH playback) |
+| CloudFront + OAC + processed bucket policy | `terraform/cloudfront.tf` | Client (DASH / HLS playback) |
 | S3 thumbnails bucket + its CloudFront distribution | `../backend/terraform/storage.tf`, `cloudfront.tf` | Client (presigned PUT, CDN reads) |
 | SQS ingest queue + DLQ | `terraform/storage.tf` | Lambda dispatcher |
 | SQS completion queue + DLQ | `terraform/storage.tf` | Transcoder (send), backend poller (receive) |
 | ElastiCache Serverless Redis | `terraform/redis.tf` | Transcoder (lock + progress), backend API (reads progress, owns `video:meta:*`) |
-| RDS PostgreSQL (`users`, `videos`) + its SG | `../backend/terraform/database.tf`, `network.tf` | Backend API, backend poller |
+| RDS PostgreSQL (`users`, `videos`, `transcode_results`) + its SG | `../backend/terraform/database.tf`, `network.tf` | Backend API, backend poller |
 | ECR repo | `terraform/ecr.tf` | ECS |
 | ECS cluster + task def + CW log group | `terraform/ecs.tf` | Lambda dispatcher |
 | Lambda dispatcher + ESM | `terraform/lambda.tf` | SQS ingest queue |
@@ -128,7 +128,7 @@ into container overrides at `ecs:RunTask` time):
 S3_BUCKET               raw upload bucket
 S3_KEY                  object key of the uploaded mp4
 VIDEO_ID                filename stem, used as Redis key suffix
-PROCESSED_BUCKET        destination bucket for DASH output
+PROCESSED_BUCKET        destination bucket for DASH + HLS output
 COMPLETION_QUEUE_URL    SQS queue that backend poller drains
 REDIS_HOST / REDIS_PORT / REDIS_TLS
 REDIS_LOCK_PREFIX       default: video:lock

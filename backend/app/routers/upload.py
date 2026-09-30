@@ -9,7 +9,7 @@ import re
 import uuid
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,7 @@ from app.clients import s3
 from app.config import get_settings
 from app.db import get_db
 from app.deps import Identity, get_current_user, get_identity
+from app.errors import APIError
 from app.models import User, Video, VideoStatus
 from app.schemas import (
     PresignedThumbnailResponse, PresignedUrlResponse, SaveVideoRequest,
@@ -39,7 +40,7 @@ def _presign(bucket: str, key: str, content_type: str) -> str:
         )
     except (BotoCoreError, ClientError):
         log.exception("presigning an upload URL failed")
-        raise HTTPException(500, "Could not create an upload URL") from None
+        raise APIError(500, "upload_url_failed", "Could not create an upload URL") from None
 
 
 @router.get("/url", response_model=PresignedUrlResponse)
@@ -66,9 +67,12 @@ def save_video_metadata(
 ):
     sub = re.escape(user.cognito_sub)
     if not re.fullmatch(rf"videos/{sub}/{_UUID}\.mp4", data.s3_key):
-        raise HTTPException(400, "s3_key must be a video_id issued by GET /upload/video/url")
+        raise APIError(400, "invalid_s3_key", "s3_key must be a video_id issued by GET /upload/video/url")
     if not re.fullmatch(rf"thumbnails/{sub}/{_UUID}", data.thumbnail_s3_key):
-        raise HTTPException(400, "thumbnail_s3_key must be a thumbnail_id issued by GET /upload/video/url/thumbnail")
+        raise APIError(
+            400, "invalid_thumbnail_key",
+            "thumbnail_s3_key must be a thumbnail_id issued by GET /upload/video/url/thumbnail",
+        )
 
     video = Video(
         title=data.title,
@@ -84,5 +88,5 @@ def save_video_metadata(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409, "This upload has already been saved") from None
+        raise APIError(409, "already_saved", "This upload has already been saved") from None
     return video

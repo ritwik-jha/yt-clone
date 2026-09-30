@@ -2,10 +2,10 @@
 
 An event-driven video upload, transcoding, and streaming backend on AWS.
 Clients upload MP4s straight to S3 via presigned URLs; an SQS-triggered
-Lambda dispatches a Fargate task that transcodes to a 3-rendition DASH
-ladder; a completion queue carries status back to the backend, which
-keeps users and videos in RDS PostgreSQL; per-video progress is published
-to Redis and read back through the API.
+Lambda dispatches a Fargate task that transcodes to a 3-rendition ladder
+packaged as DASH and HLS; a completion queue carries status back to the
+backend, which keeps users and videos in RDS PostgreSQL; per-video progress
+is published to Redis and read back through the API.
 
 There is no client application in this repository — it is backend and
 infrastructure only.
@@ -18,7 +18,7 @@ infrastructure only.
 .
 ├── backend/                       FastAPI gateway + SQS completion poller
 │   ├── app/                       routers, schemas, models, config, boto3/redis clients
-│   ├── migrations/                Alembic schema migrations (users, videos)
+│   ├── migrations/                Alembic schema migrations (users, videos, transcode_results)
 │   ├── terraform/                 ECS Express API + poller service, RDS PostgreSQL, IAM, SGs,
 │   │                              ECR, thumbnails bucket + CloudFront
 │   ├── scripts/                   generate-env (local) / push-image
@@ -31,7 +31,7 @@ infrastructure only.
 │   │                              Lambda, ElastiCache Redis, Cognito,
 │   │                              CloudFront (processed bucket)
 │   ├── lambda/                    SQS -> ecs:RunTask dispatcher
-│   ├── transcoder/                Fargate container (ffmpeg -> DASH)
+│   ├── transcoder/                Fargate container (ffmpeg -> DASH + HLS)
 │   ├── deployment-guide.md        Step-by-step deploy walkthrough
 │   └── AGENTS.md
 │
@@ -68,8 +68,8 @@ Client --presigned PUT--> S3 raw bucket
                     +--(1) SET video:lock:<id> NX EX 1800  --> ElastiCache Redis
                     +--(2) SendMessage status=processing   --> SQS completion queue
                     +--(3) SET video:progress:<id> 5..100  --> ElastiCache Redis
-                    +--(4) ffprobe duration + ffmpeg DASH  --> local /tmp
-                    +--(5) upload manifest+segments        --> S3 processed bucket
+                    +--(4) ffprobe + ffmpeg DASH/HLS       --> local /tmp
+                    +--(5) upload manifests+segments       --> S3 processed bucket
                     +--(6) SendMessage status=completed    --> SQS completion queue
                                                                     |
                                                                     | long-poll
@@ -83,11 +83,12 @@ Client --presigned PUT--> S3 raw bucket
 Client --GET /video/{id}/progress--------------------> FastAPI backend --GET video:progress:<id> --> Redis
                                                                     +-> SELECT --> PostgreSQL
 
-Client --GET manifest_url (dash player)--> CloudFront --OAC--> S3 processed bucket
+Client --GET manifest_url (DASH) | hls_url (HLS)--> CloudFront --OAC--> S3 processed bucket
 ```
 
-Transcode output is a DASH ladder at 1080p / 720p / 480p plus a 128 kbps
-stereo AAC track, 4-second segments.
+Transcode output is a ladder at 1080p / 720p / 480p (scaled to fit, so
+portrait video stays portrait) plus a 128 kbps stereo AAC track, 4-second
+fMP4 segments, described by both a DASH manifest and an HLS master playlist.
 
 ---
 
@@ -130,7 +131,7 @@ stereo AAC track, 4-second segments.
 | Backend ECS cluster, Express Mode API service (creates its HTTPS ALB), poller service | `backend/terraform/ecs.tf` |
 | Per-service execution/task roles, Express infrastructure role, SGs | `backend/terraform/{iam,network}.tf` |
 | ECR repo for the backend image, log group | `backend/terraform/{ecr,logs}.tf` |
-| RDS PostgreSQL (`users`, `videos`) and its security group | `backend/terraform/{database,network}.tf` |
+| RDS PostgreSQL (`users`, `videos`, `transcode_results`) and its security group | `backend/terraform/{database,network}.tf` |
 | S3 thumbnails bucket + its CloudFront distribution | `backend/terraform/{storage,cloudfront}.tf` |
 | Cognito user pool + app client, client-secret SSM parameter | `IAC/terraform/cognito.tf` |
 | **Custom domain for the API or CloudFront** | not provisioned (AWS-issued `*.on.aws` / `*.cloudfront.net`) |

@@ -26,6 +26,9 @@ than touching its resources. Deploy the pipeline first.
 |---|---|---|---|
 | POST | `/auth/signup` | – | Cognito `sign_up` + insert into `users` |
 | POST | `/auth/verify-otp` | – | Cognito `confirm_sign_up` |
+| POST | `/auth/resend-otp` | – | Send a new signup verification code |
+| POST | `/auth/forgot-password` | – | Email a password reset code (same response whether or not the account exists) |
+| POST | `/auth/reset-password` | – | Set a new password with the reset code |
 | POST | `/auth/login` | – | Cognito `initiate_auth`, sets HTTPOnly cookies |
 | POST | `/auth/refresh` | refresh cookie | New access cookie from the refresh token |
 | POST | `/auth/logout` | – | Revokes the refresh token (if sent), clears cookies |
@@ -36,12 +39,23 @@ than touching its resources. Deploy the pipeline first.
 | GET  | `/video/feed` | – | Paginated PUBLIC + COMPLETED videos, newest first |
 | GET  | `/video/mine` | cookie | Paginated list of the caller's videos, any status |
 | GET  | `/video/{video_id}` | optional | One video; cached in Redis `video:meta:<id>` |
+| PATCH | `/video/{video_id}` | cookie, owner | Edit title, description, visibility |
+| DELETE | `/video/{video_id}` | cookie, owner | Delete the video and, in the background, its S3 objects (204) |
 | GET  | `/video/{video_id}/progress` | optional | Transcode percent from `video:progress:<stem>` |
+| POST | `/video/{video_id}/view` | optional | Count one playback (204); 409 until COMPLETED |
 | GET  | `/healthz` | – | Liveness |
 
 Anyone may read a COMPLETED video that is PUBLIC or UNLISTED. A PRIVATE or
-unfinished video is visible only to its owner; everyone else gets 404.
-Request validation errors return 400, and a database outage returns 503.
+unfinished video is visible only to its owner; everyone else gets 404. Edit
+and delete are owner-only and also answer 404 to everyone else.
+
+Every error response has the shape `{"detail": ..., "code": ...}`. `code` is
+a stable snake_case identifier for clients to branch on (for example
+`user_not_confirmed`, `code_expired`, `too_many_attempts`, `video_not_found`,
+`video_not_ready`); `detail` is human-readable and may change. Request
+validation errors return 400 with code `validation_error` and a list of
+field errors as `detail`; a database outage returns 503
+`database_unavailable`.
 
 Cookies set by login: `access_token` (1h, `Path=/`) and `refresh_token` (5d,
 `Path=/auth/refresh`), `HttpOnly`, `Secure` (configurable), `SameSite=lax`.
@@ -60,11 +74,12 @@ backend/
 │   ├── config.py                      # pydantic-settings: environment, then .env
 │   ├── clients.py                     # boto3 + redis singletons
 │   ├── db.py                          # SQLAlchemy engine + sessions, RDS secret lookup
-│   ├── models.py                      # users + videos ORM models
+│   ├── models.py                      # users, videos, transcode_results ORM models
 │   ├── users.py                       # users-row upsert shared by signup and get_current_user
 │   ├── cache.py                       # video:meta Redis cache
 │   ├── crypto.py                      # Cognito HMAC secret_hash
 │   ├── deps.py                        # get_current_user / optional identity dependencies
+│   ├── errors.py                      # APIError with a stable error code
 │   ├── schemas.py                     # request/response models
 │   ├── routers/
 │   │   ├── auth.py
@@ -104,6 +119,7 @@ For local runs, `.env.example` documents every variable and
 |---|---|
 | `AWS_REGION` | pipeline output `aws_region` |
 | `S3_RAW_VIDEOS_BUCKET` | pipeline output `raw_bucket` |
+| `S3_PROCESSED_BUCKET` | pipeline output `processed_bucket` (only `DELETE /video/{id}` uses it) |
 | `COMPLETION_QUEUE_URL` | pipeline output `completion_queue_url` |
 | `REDIS_HOST` / `REDIS_PORT` | pipeline outputs `redis_host` / `redis_port` |
 | `REDIS_PROGRESS_PREFIX` | pipeline output `redis_progress_key_prefix` |
@@ -185,25 +201,39 @@ The schema is defined by the Alembic revisions in `migrations/versions/`;
 - `s3_key` varchar(500) unique — the raw upload key; the poller matches
   transcoder messages on it, and its filename stem names the Redis progress
   key
-- `thumbnail_s3_key` varchar(500), `dash_manifest_s3_key` varchar(500)
-  (set by the poller on completion)
+- `thumbnail_s3_key` varchar(500); `dash_manifest_s3_key` and
+  `hls_manifest_s3_key` varchar(500) (set by the poller on completion;
+  `hls_manifest_s3_key` is null for videos transcoded before HLS output)
 - `visibility` enum PUBLIC / PRIVATE / UNLISTED (indexed)
 - `status` enum PENDING / PROCESSING / COMPLETED / FAILED (indexed)
 - `user_id` FK to `users.id`, `ON DELETE CASCADE` (indexed)
-- `views_count` bigint, `duration_seconds` integer (from the transcoder's
-  ffprobe)
+- `views_count` bigint (incremented by `POST /video/{id}/view`),
+  `duration_seconds` integer (from the transcoder's ffprobe)
 - `created_at` (indexed), `updated_at`
 
-Responses carry URLs, not keys: `manifest_url` is
-`https://<CLOUDFRONT_DOMAIN>/<dash_manifest_s3_key>` and `thumbnail_url` is
-`https://<THUMBNAILS_CDN_DOMAIN>/<thumbnail_s3_key>`, both built at read time.
+Responses carry URLs, not keys: `manifest_url` (DASH) is
+`https://<CLOUDFRONT_DOMAIN>/<dash_manifest_s3_key>`, `hls_url` is the same
+for `hls_manifest_s3_key`, and `thumbnail_url` is
+`https://<THUMBNAILS_CDN_DOMAIN>/<thumbnail_s3_key>`, all built at read time.
+
+### `transcode_results`
+Written and read only by the poller. Holds a transcoder's COMPLETED or
+FAILED result when it arrives before the client has saved the `videos` row.
+The poller applies it once the row exists, and prunes entries that are
+still unmatched after 7 days.
+- `raw_key` varchar(500) PK — the raw upload key (`videos.s3_key`)
+- `status`, `dash_manifest_s3_key`, `hls_manifest_s3_key`,
+  `duration_seconds`, `error`
+- `received_at`
 
 ### Redis
 - `video:progress:<stem>` — written by the transcoder, read by
   `GET /video/{video_id}/progress`. Never written by this backend.
 - `video:meta:<video_id>` — hash cache for `GET /video/{video_id}`, written
   by the API with a TTL (`VIDEO_META_CACHE_TTL_SECONDS`). Only videos anyone
-  may watch are cached. Every Redis failure falls back to PostgreSQL.
+  may watch are cached. `PATCH` and `DELETE` remove the key; view counts are
+  not invalidated, so a cached `views_count` can lag by up to the TTL. Every
+  Redis failure falls back to PostgreSQL.
 
 ---
 

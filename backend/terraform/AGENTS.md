@@ -42,10 +42,13 @@ Fargate service, and the RDS PostgreSQL instance both use. Applied **after**
   get `secretsmanager:GetSecretValue` on that one secret and the app reads it
   at connect time. Never set `password` on the instance or put `DB_PASSWORD`
   in a task environment.
-- **One role pair per service.** The API task role has no SQS access. The
-  poller task role has no Cognito or S3 access, and the Cognito client secret
-  is readable only by the API execution role. Grant new permissions to the one
-  role that needs them.
+- **One role pair per service.** The API task role has no SQS access. Its S3
+  rights are `PutObject` (presigned uploads) and `DeleteObject` on the raw
+  `videos/*` and `thumbnails/*` prefixes, plus `DeleteObject` and
+  `ListBucket` on the pipeline's processed bucket, for `DELETE /video/{id}`.
+  The poller task role has no Cognito or S3 access, and the Cognito client
+  secret is readable only by the API execution role. Grant new permissions to
+  the one role that needs them.
 - **Mind the connection budget.** Each API task opens up to 2 workers ×
   (`api_db_pool_size` + `api_db_max_overflow`) connections, the poller 1.
   At `api_max_tasks` that total must stay under the instance class's

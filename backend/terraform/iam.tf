@@ -106,7 +106,8 @@ data "aws_iam_policy_document" "read_db_secret" {
 data "aws_iam_policy_document" "api_task" {
   source_policy_documents = [data.aws_iam_policy_document.read_db_secret.json]
 
-  # The user-facing calls (SignUp, ConfirmSignUp, InitiateAuth,
+  # The user-facing calls (SignUp, ConfirmSignUp, ResendConfirmationCode,
+  # ForgotPassword, ConfirmForgotPassword, InitiateAuth,
   # GetTokensFromRefreshToken, RevokeToken, GetUser) are unauthenticated
   # Cognito APIs, authorised by the client secret or the user's token, so
   # IAM does not evaluate them. They are listed to document what the API
@@ -117,6 +118,9 @@ data "aws_iam_policy_document" "api_task" {
     actions = [
       "cognito-idp:SignUp",
       "cognito-idp:ConfirmSignUp",
+      "cognito-idp:ResendConfirmationCode",
+      "cognito-idp:ForgotPassword",
+      "cognito-idp:ConfirmForgotPassword",
       "cognito-idp:InitiateAuth",
       "cognito-idp:GetTokensFromRefreshToken",
       "cognito-idp:RevokeToken",
@@ -145,6 +149,29 @@ data "aws_iam_policy_document" "api_task" {
       "${local.pipeline.raw_bucket_arn}/videos/*",
       "${aws_s3_bucket.thumbnails.arn}/thumbnails/*",
     ]
+  }
+
+  # DELETE /video/{id} removes the raw upload, the thumbnail, and the
+  # transcoder's output under <VIDEO_ID>/ in the processed bucket. The
+  # transcoder's own role keeps write access there; this role can only
+  # delete.
+  statement {
+    sid     = "DeleteVideoMedia"
+    effect  = "Allow"
+    actions = ["s3:DeleteObject"]
+    resources = [
+      "${local.pipeline.raw_bucket_arn}/videos/*",
+      "${aws_s3_bucket.thumbnails.arn}/thumbnails/*",
+      "${local.pipeline.processed_bucket_arn}/*",
+    ]
+  }
+
+  # Lists the transcoder output of the video being deleted.
+  statement {
+    sid       = "ListProcessedOutput"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = [local.pipeline.processed_bucket_arn]
   }
 }
 

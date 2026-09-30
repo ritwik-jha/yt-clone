@@ -21,6 +21,24 @@ def _lower(value: str) -> str:
     return value.lower()
 
 
+Password = Annotated[str, Field(min_length=8, max_length=256)]
+OTP = Annotated[str, StringConstraints(pattern=r"^[0-9]{6}$")]
+
+
+def _strength(value: str) -> str:
+    # The spec's rules plus a lowercase letter, which the Cognito pool
+    # policy also requires; checking here gives a clearer 400.
+    for pattern, what in (
+        (r"[A-Z]", "an uppercase letter"),
+        (r"[a-z]", "a lowercase letter"),
+        (r"[0-9]", "a number"),
+        (r"[^A-Za-z0-9]", "a special character"),
+    ):
+        if not re.search(pattern, value):
+            raise ValueError(f"password must contain {what}")
+    return value
+
+
 class MessageResponse(BaseModel):
     message: str
 
@@ -29,31 +47,34 @@ class MessageResponse(BaseModel):
 class SignUpRequest(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=50)]
     email: Email
-    password: str = Field(..., min_length=8, max_length=256)
+    password: Password
 
     _email = field_validator("email")(_lower)
-
-    @field_validator("password")
-    @classmethod
-    def _strength(cls, value: str) -> str:
-        # The spec's rules plus a lowercase letter, which the Cognito pool
-        # policy also requires; checking here gives a clearer 400.
-        for pattern, what in (
-            (r"[A-Z]", "an uppercase letter"),
-            (r"[a-z]", "a lowercase letter"),
-            (r"[0-9]", "a number"),
-            (r"[^A-Za-z0-9]", "a special character"),
-        ):
-            if not re.search(pattern, value):
-                raise ValueError(f"password must contain {what}")
-        return value
+    _password = field_validator("password")(_strength)
 
 
 class VerifyOTPRequest(BaseModel):
     email: Email
-    otp: Annotated[str, StringConstraints(pattern=r"^[0-9]{6}$")]
+    otp: OTP
 
     _email = field_validator("email")(_lower)
+
+
+class EmailRequest(BaseModel):
+    """Body of POST /auth/resend-otp and POST /auth/forgot-password."""
+
+    email: Email
+
+    _email = field_validator("email")(_lower)
+
+
+class ResetPasswordRequest(BaseModel):
+    email: Email
+    otp: OTP
+    new_password: Password
+
+    _email = field_validator("email")(_lower)
+    _password = field_validator("new_password")(_strength)
 
 
 class LoginRequest(BaseModel):
@@ -84,22 +105,27 @@ class PresignedThumbnailResponse(BaseModel):
     thumbnail_id: str = Field(..., description="Thumbnail S3 key: thumbnails/{user_sub}/{uuid}")
 
 
+Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+Description = Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]
+
+
+def _blank_is_none(value: Optional[str]) -> Optional[str]:
+    return value or None
+
+
+def _upper(value):
+    return value.upper() if isinstance(value, str) else value
+
+
 class SaveVideoRequest(BaseModel):
-    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
-    description: Optional[Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]] = None
+    title: Title
+    description: Optional[Description] = None
     s3_key: str = Field(..., max_length=500)
     thumbnail_s3_key: str = Field(..., max_length=500)
     visibility: Visibility
 
-    @field_validator("description")
-    @classmethod
-    def _blank_is_none(cls, value: Optional[str]) -> Optional[str]:
-        return value or None
-
-    @field_validator("visibility", mode="before")
-    @classmethod
-    def _upper(cls, value):
-        return value.upper() if isinstance(value, str) else value
+    _description = field_validator("description")(_blank_is_none)
+    _visibility = field_validator("visibility", mode="before")(_upper)
 
 
 class SaveVideoResponse(BaseModel):
@@ -122,6 +148,25 @@ class CreatorDetail(Creator):
     created_at: datetime
 
 
+class UpdateVideoRequest(BaseModel):
+    """PATCH /video/{id}. Omitted fields are left alone; description null or
+    "" clears it. Title and visibility can be omitted but not null."""
+
+    title: Optional[Title] = None
+    description: Optional[Description] = None
+    visibility: Optional[Visibility] = None
+
+    _description = field_validator("description")(_blank_is_none)
+    _visibility = field_validator("visibility", mode="before")(_upper)
+
+    @field_validator("title", "visibility")
+    @classmethod
+    def _not_null(cls, value):
+        if value is None:
+            raise ValueError("may be omitted but not null")
+        return value
+
+
 class FeedItem(BaseModel):
     id: UUID
     title: str
@@ -129,6 +174,9 @@ class FeedItem(BaseModel):
     thumbnail_url: str
     # Null until the transcoder has produced the manifest (owner views only).
     manifest_url: Optional[str] = None
+    # HLS master playlist over the same segments, for players without DASH
+    # (AVPlayer on iOS). Also null for videos transcoded before HLS output.
+    hls_url: Optional[str] = None
     views_count: int
     duration_seconds: Optional[int] = None
     creator: Creator

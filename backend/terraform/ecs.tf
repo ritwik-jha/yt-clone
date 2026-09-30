@@ -46,6 +46,7 @@ locals {
     DB_MAX_OVERFLOW              = tostring(var.api_db_max_overflow)
     S3_RAW_VIDEOS_BUCKET         = local.pipeline.raw_bucket
     S3_THUMBNAILS_BUCKET         = aws_s3_bucket.thumbnails.bucket
+    S3_PROCESSED_BUCKET          = local.pipeline.processed_bucket
     PRESIGNED_URL_TTL_SECONDS    = tostring(var.presigned_url_ttl_seconds)
     CLOUDFRONT_DOMAIN            = local.pipeline.cloudfront_domain_name
     THUMBNAILS_CDN_DOMAIN        = aws_cloudfront_distribution.thumbnails.domain_name

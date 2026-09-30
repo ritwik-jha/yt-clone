@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # S3
     s3_raw_videos_bucket: str = ""
     s3_thumbnails_bucket: str = ""
+    # The pipeline's transcoder output bucket. Only DELETE /video/{id} uses it,
+    # to remove a deleted video's DASH/HLS files.
+    s3_processed_bucket: str = ""
     presigned_url_ttl_seconds: int = 3600
 
     # SQS completion queue (drained by poller worker)

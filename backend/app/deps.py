@@ -11,12 +11,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.clients import cognito
 from app.db import get_db
+from app.errors import APIError
 from app.models import User
 from app.users import upsert_user
 
@@ -32,8 +33,12 @@ class Identity:
     name: str
 
 
-def _unauthorized(detail: str) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+def _unauthorized(code: str, detail: str) -> APIError:
+    return APIError(status.HTTP_401_UNAUTHORIZED, code, detail)
+
+
+def _idp_unavailable() -> APIError:
+    return APIError(503, "identity_provider_unavailable", "Identity provider unavailable")
 
 
 def _extract_token(request: Request) -> Optional[str]:
@@ -52,16 +57,16 @@ def _identity_from_token(token: str) -> Identity:
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in ("NotAuthorizedException", "UserNotFoundException"):
-            raise _unauthorized("Token invalid or revoked") from None
+            raise _unauthorized("token_invalid", "Token invalid or revoked") from None
         log.error("Cognito GetUser failed: %s", code)
-        raise HTTPException(status_code=503, detail="Identity provider unavailable") from None
+        raise _idp_unavailable() from None
     except BotoCoreError as exc:
         log.error("Cognito GetUser failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Identity provider unavailable") from None
+        raise _idp_unavailable() from None
 
     attrs = {a["Name"]: a["Value"] for a in resp.get("UserAttributes", [])}
     if "sub" not in attrs:
-        raise _unauthorized("Invalid token payload")
+        raise _unauthorized("invalid_token_payload", "Invalid token payload")
     return Identity(
         sub=attrs["sub"],
         email=attrs.get("email", "").lower(),
@@ -72,7 +77,7 @@ def _identity_from_token(token: str) -> Identity:
 def get_identity(request: Request) -> Identity:
     token = _extract_token(request)
     if not token:
-        raise _unauthorized("Missing access token")
+        raise _unauthorized("missing_access_token", "Missing access token")
     return _identity_from_token(token)
 
 

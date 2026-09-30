@@ -2,8 +2,11 @@
 
 Only videos anyone may watch (COMPLETED and not PRIVATE) are cached, so a hit
 never needs an ownership check. The hash carries the spec's fields plus the
-few the detail response needs beyond them (visibility, duration_seconds,
-created_at, creator_id, creator_created_at).
+few the detail response needs beyond them (hls_url, visibility,
+duration_seconds, created_at, creator_id, creator_created_at).
+
+PATCH and DELETE /video/{video_id} drop the key after they commit. Any other
+path that changes a cached field must do the same.
 
 Redis is an optimisation here: every failure is logged and the caller falls
 back to PostgreSQL.
@@ -43,6 +46,8 @@ def get_video(video_id: UUID) -> Optional[VideoDetail]:
             description=data["description"] or None,
             thumbnail_url=data["thumbnail_url"],
             manifest_url=data["manifest_url"] or None,
+            # .get: entries written before HLS output have no such field.
+            hls_url=data.get("hls_url") or None,
             views_count=int(data["views_count"]),
             duration_seconds=int(data["duration_seconds"]) if data["duration_seconds"] else None,
             created_at=data["created_at"],
@@ -66,6 +71,7 @@ def put_video(video: VideoDetail) -> None:
         "description":        video.description or "",
         "thumbnail_url":      video.thumbnail_url,
         "manifest_url":       video.manifest_url or "",
+        "hls_url":            video.hls_url or "",
         "creator_name":       video.creator.name,
         "status":             video.status.value,
         "views_count":        str(video.views_count),
@@ -83,3 +89,12 @@ def put_video(video: VideoDetail) -> None:
         pipe.execute()
     except redis.RedisError as exc:
         log.warning("video meta cache write failed: %s", exc)
+
+
+def drop_video(video_id: UUID) -> None:
+    """Forget a cached video. With Redis down the stale entry, if any, lives
+    until its TTL."""
+    try:
+        redis_client().delete(_key(video_id))
+    except redis.RedisError as exc:
+        log.warning("video meta cache delete failed: %s", exc)

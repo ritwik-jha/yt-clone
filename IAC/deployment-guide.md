@@ -140,7 +140,7 @@ All defaults live in `terraform/variables.tf`; override any of these in
   AWS-issued hostnames.
 
 This stack **does** provision the CloudFront distribution (`cloudfront.tf`)
-that serves DASH output from the private processed bucket through Origin
+that serves DASH and HLS output from the private processed bucket through Origin
 Access Control, and the SSM SecureString holding the Cognito client secret
 that the backend API task reads at start.
 
@@ -165,25 +165,30 @@ backend's PostgreSQL `videos` table:
     "raw_key":      "raw/8b2e-...-9f01.mp4",
     "status":           "processing" | "completed" | "failed",
     "manifest_uri":     "s3://my-org-processed-videos/8b2e-.../dash/manifest.mpd",
+    "hls_manifest_uri": "s3://my-org-processed-videos/8b2e-.../dash/master.m3u8",
     "duration_seconds": 61,
     "error":            "",
     "task_token":       "arn:aws:ecs:...:task/...",
     "timestamp":        1736467200
   }
   ```
-  `manifest_uri` and `duration_seconds` are set only on `completed`.
+  `manifest_uri`, `hls_manifest_uri`, and `duration_seconds` are set only
+  on `completed`. Both manifests sit in the same `dash/` prefix and
+  reference the same fMP4 segments.
 - **Write**: a guarded `UPDATE videos ... WHERE s3_key = <raw_key>`.
   `processing` only replaces `PENDING`; `failed` never replaces
-  `COMPLETED`; `completed` stores `dash_manifest_s3_key` (the key parsed
-  from `manifest_uri`) and `duration_seconds`. The API builds
-  `https://<cloudfront_domain_name>/<dash_manifest_s3_key>` when it reads
-  the row, and players load that.
+  `COMPLETED`; `completed` stores `dash_manifest_s3_key` and
+  `hls_manifest_s3_key` (the keys parsed from the two URIs) and
+  `duration_seconds`. The API builds
+  `https://<cloudfront_domain_name>/<key>` for each when it reads the row:
+  `manifest_url` for DASH players, `hls_url` for AVPlayer / Safari.
 - **Idempotency**: the guards make redelivered and out-of-order messages
   no-ops, so the poller never moves a status backwards.
 - **Row not saved yet**: the row exists only after the client calls
-  `POST /upload/video/save`. A `processing` message with no row is dropped;
-  a `completed` or `failed` one is left on the queue to redeliver, and lands
-  in the completion DLQ if the row never appears.
+  `POST /upload/video/save`. A `processing` message with no row is dropped.
+  A `completed` or `failed` one is parked in the backend's
+  `transcode_results` table and deleted from the queue; the poller applies
+  it once the row appears, and prunes it after 7 days if it never does.
 - **Progress endpoint**: `GET /video/{id}/progress` reads
   `video:progress:<video_id>` from Redis (same `redis_endpoint` output).
   No database round-trip beyond loading the video.
@@ -294,11 +299,13 @@ aws sqs receive-message --queue-url "$(terraform -chdir=../terraform output -raw
 aws s3 ls "s3://$(terraform -chdir=../terraform output -raw processed_bucket)/$VIDEO_ID/dash/"
 ```
 
+The listing should show `manifest.mpd`, `master.m3u8`, the `media_<n>.m3u8`
+playlists, and the `init-*.m4s` / `chunk-*.m4s` segments.
+
 An upload made this way has no `videos` row, because only
 `POST /upload/video/save` creates one. Once the backend poller is running
-it drops the `processing` message and leaves the `completed` one to
-redeliver until it reaches the completion DLQ. To see a row reach
-`COMPLETED`, upload through the API instead
+it drops the `processing` message and parks the `completed` one, pruning it
+after 7 days. To see a row reach `COMPLETED`, upload through the API instead
 (`../backend/deployment-guide.md`).
 
 ---

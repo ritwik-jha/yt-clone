@@ -115,6 +115,7 @@ require() {  # $1 = key, $2 = value
 
 AWS_REGION_V="$(require AWS_REGION "$(pipeline_out aws_region)")"
 RAW_BUCKET="$(require S3_RAW_VIDEOS_BUCKET "$(pipeline_out raw_bucket)")"
+PROCESSED_BUCKET="$(require S3_PROCESSED_BUCKET "$(pipeline_out processed_bucket)")"
 COMPLETION_URL="$(require COMPLETION_QUEUE_URL "$(pipeline_out completion_queue_url)")"
 REDIS_PREFIX="$(pipeline_out redis_progress_key_prefix)"
 
@@ -201,6 +202,7 @@ DB_MAX_OVERFLOW=$(carried DB_MAX_OVERFLOW)
 # --- S3 buckets ---
 S3_RAW_VIDEOS_BUCKET=${RAW_BUCKET}
 S3_THUMBNAILS_BUCKET=${THUMB_BUCKET}
+S3_PROCESSED_BUCKET=${PROCESSED_BUCKET}
 PRESIGNED_URL_TTL_SECONDS=$(carried PRESIGNED_URL_TTL_SECONDS)
 
 # --- SQS completion queue ---
