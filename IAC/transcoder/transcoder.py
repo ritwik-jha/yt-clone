@@ -13,9 +13,11 @@ Flow per invocation:
        completed      -> 100 (also released)
      Every progress write refreshes the lock TTL so a long transcode does
      not lose its lock mid-way.
-  4. On success: SendMessage to the completion SQS queue (consumed by the
-     backend poller which upserts to DynamoDB). On failure: send a failed
-     message and re-raise so ECS marks the task failed.
+  4. Status messages go to the completion SQS queue, which the backend
+     poller drains into PostgreSQL: "processing" once the lock is held
+     (best effort), then "completed" with the manifest URI and the input's
+     duration from ffprobe, or "failed" with the error, after which the task
+     exits non-zero so ECS marks it failed.
 
 Env contract (injected by dispatcher Lambda via containerOverrides):
   S3_BUCKET               raw upload bucket
@@ -132,6 +134,22 @@ def download_input() -> None:
     set_progress(25)
 
 
+def probe_duration() -> int | None:
+    """Whole seconds of input, or None if ffprobe cannot tell (non-fatal)."""
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(INPUT_FILE),
+    ]
+    try:
+        out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+        seconds = round(float(out.strip()))
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        log(f"probe_duration failed (non-fatal): {exc}")
+        return None
+    log(f"duration={seconds}s")
+    return seconds
+
+
 def run_ffmpeg() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -177,16 +195,20 @@ def upload_output() -> str:
     return f"s3://{PROCESSED_BUCKET}/{base_prefix}/manifest.mpd"
 
 
-def send_completion(status: str, manifest_uri: str, error: str = "") -> None:
+def send_status(
+    status: str, manifest_uri: str = "", error: str = "",
+    duration_seconds: int | None = None,
+) -> None:
     body = {
-        "video_id":     VIDEO_ID,
-        "raw_bucket":   RAW_BUCKET,
-        "raw_key":      RAW_KEY,
-        "status":       status,
-        "manifest_uri": manifest_uri,
-        "error":        error,
-        "task_token":   TASK_TOKEN,
-        "timestamp":    int(time.time()),
+        "video_id":         VIDEO_ID,
+        "raw_bucket":       RAW_BUCKET,
+        "raw_key":          RAW_KEY,
+        "status":           status,
+        "manifest_uri":     manifest_uri,
+        "duration_seconds": duration_seconds,
+        "error":            error,
+        "task_token":       TASK_TOKEN,
+        "timestamp":        int(time.time()),
     }
     sqs.send_message(
         QueueUrl=COMPLETION_URL,
@@ -196,7 +218,7 @@ def send_completion(status: str, manifest_uri: str, error: str = "") -> None:
             "status":   {"DataType": "String", "StringValue": status},
         },
     )
-    log(f"completion message sent status={status}")
+    log(f"status message sent status={status}")
 
 
 def main() -> int:
@@ -204,17 +226,24 @@ def main() -> int:
         return 0  # duplicate dispatch — exit cleanly, do not fail the task
 
     try:
+        # Best effort: the terminal message carries everything that matters,
+        # so a lost "processing" message must not fail the transcode.
+        try:
+            send_status("processing")
+        except Exception as exc:
+            log(f"send_status(processing) failed (non-fatal): {exc}")
         download_input()
+        duration = probe_duration()
         run_ffmpeg()
         manifest_uri = upload_output()
-        send_completion("completed", manifest_uri)
+        send_status("completed", manifest_uri, duration_seconds=duration)
         set_progress(100)
         return 0
     except subprocess.CalledProcessError as exc:
-        send_completion("failed", "", f"ffmpeg exit {exc.returncode}")
+        send_status("failed", error=f"ffmpeg exit {exc.returncode}")
         return exc.returncode
     except Exception as exc:
-        send_completion("failed", "", str(exc))
+        send_status("failed", error=str(exc))
         log(f"FATAL: {exc}")
         return 1
     finally:

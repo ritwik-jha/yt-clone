@@ -3,8 +3,9 @@
 An event-driven video upload, transcoding, and streaming backend on AWS.
 Clients upload MP4s straight to S3 via presigned URLs; an SQS-triggered
 Lambda dispatches a Fargate task that transcodes to a 3-rendition DASH
-ladder; a completion queue drives DynamoDB status writes; per-video
-progress is published to Redis and read back through the API.
+ladder; a completion queue carries status back to the backend, which
+keeps users and videos in RDS PostgreSQL; per-video progress is published
+to Redis and read back through the API.
 
 There is no client application in this repository — it is backend and
 infrastructure only.
@@ -16,8 +17,10 @@ infrastructure only.
 ```
 .
 ├── backend/                       FastAPI gateway + SQS completion poller
-│   ├── app/                       routers, schemas, config, boto3/redis clients
-│   ├── terraform/                 ECS Express API + poller service, IAM, SGs, ECR, thumbnails bucket
+│   ├── app/                       routers, schemas, models, config, boto3/redis clients
+│   ├── migrations/                Alembic schema migrations (users, videos)
+│   ├── terraform/                 ECS Express API + poller service, RDS PostgreSQL, IAM, SGs,
+│   │                              ECR, thumbnails bucket + CloudFront
 │   ├── scripts/                   generate-env (local) / push-image
 │   ├── Dockerfile, docker-compose.yml
 │   ├── deployment-guide.md        Deploy walkthrough (run after the pipeline)
@@ -25,14 +28,14 @@ infrastructure only.
 │
 ├── IAC/                           The transcoding pipeline
 │   ├── terraform/                 VPC, S3 x2, SQS x2 + DLQs, ECR, ECS, IAM,
-│   │                              Lambda, ElastiCache Redis, DynamoDB x2,
-│   │                              Cognito, CloudFront (processed bucket)
+│   │                              Lambda, ElastiCache Redis, Cognito,
+│   │                              CloudFront (processed bucket)
 │   ├── lambda/                    SQS -> ecs:RunTask dispatcher
 │   ├── transcoder/                Fargate container (ffmpeg -> DASH)
 │   ├── deployment-guide.md        Step-by-step deploy walkthrough
 │   └── AGENTS.md
 │
-└── *.md                           Design guides (see "Design docs" below)
+└── docs/                          Specs and design guides (see "Design docs" below)
 ```
 
 `backend/` is deliberately a sibling of `IAC/`, not a child: it is
@@ -63,21 +66,22 @@ Client --presigned PUT--> S3 raw bucket
                              v
                     Fargate transcoder container
                     +--(1) SET video:lock:<id> NX EX 1800  --> ElastiCache Redis
-                    +--(2) SET video:progress:<id> 5..100  --> ElastiCache Redis
-                    +--(3) ffmpeg 3-rendition DASH        --> local /tmp
-                    +--(4) upload manifest+segments        --> S3 processed bucket
-                    +--(5) SendMessage completion payload  --> SQS completion queue
+                    +--(2) SendMessage status=processing   --> SQS completion queue
+                    +--(3) SET video:progress:<id> 5..100  --> ElastiCache Redis
+                    +--(4) ffprobe duration + ffmpeg DASH  --> local /tmp
+                    +--(5) upload manifest+segments        --> S3 processed bucket
+                    +--(6) SendMessage status=completed    --> SQS completion queue
                                                                     |
                                                                     | long-poll
                                                                     v
                                                   backend poller (ECS service)
                                                                     |
-                                                                    | UpdateItem (idempotent)
+                                                                    | guarded UPDATE (idempotent)
                                                                     v
-                                                       DynamoDB video-status
+                                                  RDS PostgreSQL videos
                                                                     ^
-Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET video:progress:<id> --> Redis
-                                                                    +-> GetItem --> DynamoDB
+Client --GET /video/{id}/progress--------------------> FastAPI backend --GET video:progress:<id> --> Redis
+                                                                    +-> SELECT --> PostgreSQL
 
 Client --GET manifest_url (dash player)--> CloudFront --OAC--> S3 processed bucket
 ```
@@ -99,14 +103,16 @@ stereo AAC track, 4-second segments.
   may fire twice for one upload. The transcoder's `SET NX` lock makes the
   loser exit(0) without redoing work. Release is a compare-and-delete Lua
   script keyed on the ECS task ARN, so a worker can only free its own lock.
-- **Backend never writes terminal video status directly.** `POST
-  /upload/video/save` writes the initial `PROCESSING` row; every
-  COMPLETED/FAILED write goes through the SQS poller. This keeps DynamoDB
-  write pressure off the Fargate completion burst.
+- **The API never writes processing status.** `POST /upload/video/save`
+  inserts the `videos` row as `PENDING`; every later status change
+  (`PROCESSING`, `COMPLETED`, `FAILED`) is applied by the SQS poller with a
+  guarded UPDATE that never moves a status backwards. The pipeline never
+  connects to the database.
 - **Backend never mints Redis progress values.** The transcoder is the sole
-  writer; the backend is read-only against Redis.
-- **Cognito is the identity source of truth.** The DynamoDB `users` table
-  is a mirror keyed by `cognito_sub`, for joins only — no passwords.
+  writer of `video:progress:*`; the backend only reads it. The API does own
+  its `video:meta:*` cache of public video metadata in the same Redis.
+- **Cognito is the identity source of truth.** The PostgreSQL `users` table
+  is a profile mirror keyed by `cognito_sub` — no passwords.
 
 ---
 
@@ -118,14 +124,14 @@ stereo AAC track, 4-second segments.
 | S3 raw + processed buckets | `IAC/terraform/storage.tf` |
 | SQS ingest + completion queues, both with DLQs | `IAC/terraform/storage.tf` |
 | ElastiCache Serverless Redis | `IAC/terraform/redis.tf` |
-| DynamoDB `video-status` + `users` | `IAC/terraform/dynamodb.tf` |
 | ECR repo, ECS cluster + task definition, CW log group | `IAC/terraform/{ecr,ecs}.tf` |
 | Lambda dispatcher + event source mapping | `IAC/terraform/lambda.tf` |
 | CloudFront distribution + OAC for the processed bucket | `IAC/terraform/cloudfront.tf` |
 | Backend ECS cluster, Express Mode API service (creates its HTTPS ALB), poller service | `backend/terraform/ecs.tf` |
 | Per-service execution/task roles, Express infrastructure role, SGs | `backend/terraform/{iam,network}.tf` |
 | ECR repo for the backend image, log group | `backend/terraform/{ecr,logs}.tf` |
-| S3 thumbnails bucket | `backend/terraform/storage.tf` |
+| RDS PostgreSQL (`users`, `videos`) and its security group | `backend/terraform/{database,network}.tf` |
+| S3 thumbnails bucket + its CloudFront distribution | `backend/terraform/{storage,cloudfront}.tf` |
 | Cognito user pool + app client, client-secret SSM parameter | `IAC/terraform/cognito.tf` |
 | **Custom domain for the API or CloudFront** | not provisioned (AWS-issued `*.on.aws` / `*.cloudfront.net`) |
 
@@ -158,14 +164,17 @@ terraform -chdir=terraform apply -var image_tag=<tag>
 ```
 
 The two services (`api`, `poller`) run from one image. Their environment is
-built by `backend/terraform/ecs.tf` from both stacks' Terraform state, and the
-Cognito client secret is injected from SSM. Nothing is supplied by hand.
+built by `backend/terraform/ecs.tf` from both stacks' Terraform state, the
+Cognito client secret is injected from SSM, and both read the database
+password from the RDS-managed Secrets Manager secret. Nothing is supplied by
+hand. The API applies Alembic migrations when it starts.
 
 Backend locally:
 
 ```bash
 cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env && uvicorn app.main:app --reload
+cp .env.example .env && docker compose up -d postgres
+.venv/bin/alembic upgrade head && .venv/bin/uvicorn app.main:app --reload
 ```
 
 Defaults: region `ap-south-1` (overridable in `terraform.tfvars`), ARM64
@@ -175,15 +184,14 @@ transcoder image, x86_64 backend image.
 
 ## Design docs
 
-The five Markdown guides at the repo root predate the implementation and
-are kept as design rationale, not as a description of the current system.
-Where they disagree with the code, **the code is authoritative**. Known
-divergences:
+`docs/api-and-db-schema-spec.md` is the API and database schema spec the
+backend implements. The other guides in `docs/` predate the implementation
+and are kept as design rationale, not as a description of the current
+system. Where they disagree with the code, **the code is authoritative**.
+Known divergences:
 
 | Guide | Says | Actually implemented as |
 |---|---|---|
-| `auth-implementation-guide.md` | PostgreSQL user store, SQLAlchemy models | DynamoDB `users` table, no ORM |
-| `s3-upload-and-metadata-guide.md` | PostgreSQL video metadata | DynamoDB `video-status` table |
 | `ecs-sqs-deployment-guide.md` | Long-running Python SQS consumer daemon dispatches tasks | Lambda event source mapping dispatches tasks |
 | `ecs-task-definition-spec.md` | Hand-written `task-definition.json` | `aws_ecs_task_definition` in `IAC/terraform/ecs.tf` |
 | several | Backend processes under systemd in a venv | ECS services (Express Mode API + Fargate poller), provisioned by `backend/terraform` |

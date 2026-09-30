@@ -9,7 +9,9 @@
 # infrastructure-derived variable into .env — including Cognito, which the
 # pipeline stack provisions. Values no stack owns (cookie/CORS policy) are
 # carried over from the existing .env, then from the process environment,
-# then from .env.example.
+# then from .env.example. So are the DB_* settings: RDS is private to the VPC,
+# so local runs use the PostgreSQL in docker-compose.yml, never the RDS
+# endpoint.
 #
 # Two ways to read state:
 #   default        `terraform -chdir=<dir> output -json`  (works with any backend)
@@ -81,7 +83,7 @@ if BACKEND_OUT_TRY="$(read_outputs "$BACKEND_TF_DIR" "$BACKEND_STATE")"; then
   BACKEND_OUT="$BACKEND_OUT_TRY"
 fi
 [[ "$(jq 'length' <<<"$BACKEND_OUT")" -gt 0 ]] \
-  || note "backend stack has no outputs yet — S3_THUMBNAILS_BUCKET will fall back"
+  || note "backend stack has no outputs yet — S3_THUMBNAILS_BUCKET and THUMBNAILS_CDN_DOMAIN will fall back"
 
 pipeline_out() { jq -r --arg k "$1" '(.[$k].value // empty) | tostring' <<<"$PIPELINE_OUT"; }
 backend_out()  { jq -r --arg k "$1" '(.[$k].value // empty) | tostring' <<<"$BACKEND_OUT"; }
@@ -113,8 +115,6 @@ require() {  # $1 = key, $2 = value
 
 AWS_REGION_V="$(require AWS_REGION "$(pipeline_out aws_region)")"
 RAW_BUCKET="$(require S3_RAW_VIDEOS_BUCKET "$(pipeline_out raw_bucket)")"
-DDB_VIDEOS="$(require DDB_VIDEOS_TABLE "$(pipeline_out dynamodb_table)")"
-DDB_USERS="$(require DDB_USERS_TABLE "$(pipeline_out dynamodb_users_table)")"
 COMPLETION_URL="$(require COMPLETION_QUEUE_URL "$(pipeline_out completion_queue_url)")"
 REDIS_PREFIX="$(pipeline_out redis_progress_key_prefix)"
 
@@ -150,6 +150,16 @@ COGNITO_CLIENT="$(require COGNITO_CLIENT_ID "$(pipeline_out cognito_user_pool_cl
 COGNITO_SECRET="$(require COGNITO_CLIENT_SECRET "$(pipeline_out cognito_user_pool_client_secret)")"
 CLOUDFRONT="$(require CLOUDFRONT_DOMAIN "$(pipeline_out cloudfront_domain_name)")"
 
+# The thumbnails distribution belongs to the backend stack. A placeholder only
+# breaks thumbnail URLs rather than sending uploads anywhere, so warn and go on.
+THUMB_CDN="$(backend_out thumbnails_cdn_domain)"
+if [[ -z "$THUMB_CDN" ]]; then
+  THUMB_CDN="$(carried THUMBNAILS_CDN_DOMAIN)"
+  if [[ "$THUMB_CDN" == "$(from_file THUMBNAILS_CDN_DOMAIN "$EXAMPLE_FILE")" ]]; then
+    note "THUMBNAILS_CDN_DOMAIN is the .env.example placeholder — thumbnail URLs will not resolve until backend/terraform is applied"
+  fi
+fi
+
 # ------------------------------------------------------------------- emit
 
 TMP_FILE="$(mktemp)"
@@ -177,9 +187,16 @@ COGNITO_USER_POOL_ID=${COGNITO_POOL}
 COGNITO_CLIENT_ID=${COGNITO_CLIENT}
 COGNITO_CLIENT_SECRET=${COGNITO_SECRET}
 
-# --- DynamoDB ---
-DDB_VIDEOS_TABLE=${DDB_VIDEOS}
-DDB_USERS_TABLE=${DDB_USERS}
+# --- PostgreSQL (local; docker-compose.yml overrides DB_HOST/DB_SSLMODE) ---
+DB_HOST=$(carried DB_HOST)
+DB_PORT=$(carried DB_PORT)
+DB_NAME=$(carried DB_NAME)
+DB_USER=$(carried DB_USER)
+DB_PASSWORD=$(carried DB_PASSWORD)
+DB_SECRET_ARN=$(carried DB_SECRET_ARN)
+DB_SSLMODE=$(carried DB_SSLMODE)
+DB_POOL_SIZE=$(carried DB_POOL_SIZE)
+DB_MAX_OVERFLOW=$(carried DB_MAX_OVERFLOW)
 
 # --- S3 buckets ---
 S3_RAW_VIDEOS_BUCKET=${RAW_BUCKET}
@@ -191,14 +208,17 @@ COMPLETION_QUEUE_URL=${COMPLETION_URL}
 COMPLETION_POLL_WAIT_SECONDS=$(carried COMPLETION_POLL_WAIT_SECONDS)
 COMPLETION_MAX_MESSAGES=$(carried COMPLETION_MAX_MESSAGES)
 
-# --- Redis (progress reads only) ---
+# --- Redis (progress reads + video:meta cache) ---
 REDIS_HOST=${REDIS_HOST_V}
 REDIS_PORT=${REDIS_PORT_V}
 REDIS_TLS=$(carried REDIS_TLS)
 REDIS_PROGRESS_PREFIX=${REDIS_PREFIX:-$(carried REDIS_PROGRESS_PREFIX)}
+REDIS_META_PREFIX=$(carried REDIS_META_PREFIX)
+VIDEO_META_CACHE_TTL_SECONDS=$(carried VIDEO_META_CACHE_TTL_SECONDS)
 
-# --- CloudFront (playback domain for the processed bucket) ---
+# --- CloudFront (playback: processed bucket; thumbnails: backend stack) ---
 CLOUDFRONT_DOMAIN=${CLOUDFRONT}
+THUMBNAILS_CDN_DOMAIN=${THUMB_CDN}
 EOF
 
 mkdir -p "$(dirname "$OUT_FILE")"

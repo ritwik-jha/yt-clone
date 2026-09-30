@@ -1,6 +1,8 @@
 # Thumbnails bucket. Clients PUT here directly with a presigned URL minted by
-# GET /upload/video/url/thumbnail. The pipeline never touches it, which is why
-# it lives in the backend stack rather than IAC/terraform.
+# GET /upload/video/url/thumbnail and read through the CloudFront distribution
+# in cloudfront.tf; the bucket itself stays private. The pipeline never
+# touches it, which is why it lives in the backend stack rather than
+# IAC/terraform.
 resource "aws_s3_bucket" "thumbnails" {
   bucket        = var.thumbnails_bucket_name
   force_destroy = true

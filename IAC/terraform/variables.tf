@@ -174,19 +174,6 @@ variable "redis_progress_key_prefix" {
   default     = "video:progress"
 }
 
-# ---------- DynamoDB (backend app data store) ----------
-variable "dynamodb_table_name" {
-  description = "DynamoDB table storing video status records (partition key: video_id)"
-  type        = string
-  default     = "video-status"
-}
-
-variable "dynamodb_users_table_name" {
-  description = "DynamoDB table storing user profile mirror (partition key: cognito_sub)"
-  type        = string
-  default     = "users"
-}
-
 # ---------- Cognito (identity provider) ----------
 variable "cognito_user_pool_name" {
   description = "Name of the Cognito user pool backing the backend's auth routes"

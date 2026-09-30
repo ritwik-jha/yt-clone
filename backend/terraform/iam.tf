@@ -8,7 +8,7 @@
 #
 # Execution and task roles are split per service so the poller can never
 # read the Cognito secret or call Cognito, and the API can never drain the
-# completion queue or write terminal video status.
+# completion queue. Both task roles read the RDS-managed database secret.
 
 data "aws_iam_policy_document" "ecs_tasks_assume" {
   statement {
@@ -92,7 +92,25 @@ resource "aws_iam_role_policy" "poller_execution" {
 
 # ---------------------------------------------------------------- API task
 
+# Reading the password needs no kms:Decrypt grant: RDS encrypts the secret
+# with the AWS-managed aws/secretsmanager key.
+data "aws_iam_policy_document" "read_db_secret" {
+  statement {
+    sid       = "ReadDatabaseSecret"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [aws_db_instance.main.master_user_secret[0].secret_arn]
+  }
+}
+
 data "aws_iam_policy_document" "api_task" {
+  source_policy_documents = [data.aws_iam_policy_document.read_db_secret.json]
+
+  # The user-facing calls (SignUp, ConfirmSignUp, InitiateAuth,
+  # GetTokensFromRefreshToken, RevokeToken, GetUser) are unauthenticated
+  # Cognito APIs, authorised by the client secret or the user's token, so
+  # IAM does not evaluate them. They are listed to document what the API
+  # calls.
   statement {
     sid    = "CognitoAuthOperations"
     effect = "Allow"
@@ -100,27 +118,21 @@ data "aws_iam_policy_document" "api_task" {
       "cognito-idp:SignUp",
       "cognito-idp:ConfirmSignUp",
       "cognito-idp:InitiateAuth",
+      "cognito-idp:GetTokensFromRefreshToken",
+      "cognito-idp:RevokeToken",
       "cognito-idp:GetUser",
     ]
     resources = [local.pipeline.cognito_user_pool_arn]
   }
 
-  # PutItem for the initial PROCESSING row and the users mirror; no
-  # UpdateItem — terminal status writes belong to the poller.
+  # The one IAM-authorised Cognito call: signup deletes the Cognito user it
+  # just created when the users row cannot be written, so the email can sign
+  # up again.
   statement {
-    sid    = "VideoAndUserTables"
-    effect = "Allow"
-    actions = [
-      "dynamodb:GetItem",
-      "dynamodb:PutItem",
-      "dynamodb:Query",
-    ]
-    resources = [
-      local.pipeline.dynamodb_table_arn,
-      "${local.pipeline.dynamodb_table_arn}/index/*",
-      local.pipeline.dynamodb_users_table_arn,
-      "${local.pipeline.dynamodb_users_table_arn}/index/*",
-    ]
+    sid       = "RollBackFailedSignup"
+    effect    = "Allow"
+    actions   = ["cognito-idp:AdminDeleteUser"]
+    resources = [local.pipeline.cognito_user_pool_arn]
   }
 
   # Grants the presigned PUT URLs their authority. The API process itself
@@ -150,6 +162,8 @@ resource "aws_iam_role_policy" "api_task" {
 # ---------------------------------------------------------------- poller task
 
 data "aws_iam_policy_document" "poller_task" {
+  source_policy_documents = [data.aws_iam_policy_document.read_db_secret.json]
+
   statement {
     sid    = "DrainCompletionQueue"
     effect = "Allow"
@@ -159,13 +173,6 @@ data "aws_iam_policy_document" "poller_task" {
       "sqs:GetQueueAttributes",
     ]
     resources = [local.pipeline.completion_queue_arn]
-  }
-
-  statement {
-    sid       = "WriteTerminalVideoStatus"
-    effect    = "Allow"
-    actions   = ["dynamodb:UpdateItem"]
-    resources = [local.pipeline.dynamodb_table_arn]
   }
 }
 

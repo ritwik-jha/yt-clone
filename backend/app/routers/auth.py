@@ -1,17 +1,43 @@
-"""Auth routes — Cognito wrapper + DynamoDB user mirror."""
+"""Auth routes — Cognito wrapper + PostgreSQL users mirror.
 
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+Tokens travel only in HttpOnly cookies and are never logged. The refresh
+cookie is scoped to Path=/auth/refresh, so a browser sends it nowhere else;
+native clients that attach cookies themselves also send it to /auth/logout,
+which revokes it.
+"""
 
-from app.clients import cognito, users_table
+import logging
+from typing import NoReturn, Optional
+
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from app.clients import cognito
 from app.config import get_settings
 from app.crypto import secret_hash
-from app.deps import get_current_user
+from app.db import get_db
+from app.deps import ACCESS_COOKIE, get_current_user
+from app.models import User
 from app.schemas import (
-    LoginRequest, SignUpRequest, UserProfileResponse, VerifyOTPRequest,
+    LoginRequest, MessageResponse, SignUpRequest, UserProfileResponse,
+    VerifyOTPRequest,
 )
+from app.users import upsert_user
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+REFRESH_COOKIE = "refresh_token"
+REFRESH_PATH = "/auth/refresh"
+
+_THROTTLED = {
+    "TooManyRequestsException",
+    "TooManyFailedAttemptsException",
+    "LimitExceededException",
+}
 
 
 def _hash(email: str) -> str:
@@ -19,8 +45,40 @@ def _hash(email: str) -> str:
     return secret_hash(email, s.cognito_client_id, s.cognito_client_secret)
 
 
-@router.post("/signup", status_code=status.HTTP_201_CREATED)
-def signup(data: SignUpRequest):
+def _raise_cognito(
+    operation: str, exc: Exception, known: dict[str, tuple[int, Optional[str]]],
+) -> NoReturn:
+    """Map a Cognito failure to an HTTP error. A None detail passes Cognito's
+    own message through (it is written for end users)."""
+    error = exc.response.get("Error", {}) if isinstance(exc, ClientError) else {}
+    code = error.get("Code", type(exc).__name__)
+    if code in known:
+        status_code, detail = known[code]
+        raise HTTPException(status_code, detail or error.get("Message", code)) from None
+    if code in _THROTTLED:
+        raise HTTPException(429, "Too many attempts, try again later") from None
+    log.error("Cognito %s failed: %s", operation, code)
+    raise HTTPException(500, "Identity provider error") from None
+
+
+def _set_cookie(response: Response, name: str, value: str, max_age: int, path: str) -> None:
+    s = get_settings()
+    response.set_cookie(
+        key=name, value=value, max_age=max_age, path=path,
+        httponly=True, secure=s.cookie_secure, samesite=s.cookie_samesite,
+    )
+
+
+def _clear_cookie(response: Response, name: str, path: str) -> None:
+    s = get_settings()
+    response.delete_cookie(
+        key=name, path=path,
+        httponly=True, secure=s.cookie_secure, samesite=s.cookie_samesite,
+    )
+
+
+@router.post("/signup", response_model=MessageResponse)
+def signup(data: SignUpRequest, db: Session = Depends(get_db)):
     s = get_settings()
     try:
         resp = cognito().sign_up(
@@ -33,49 +91,52 @@ def signup(data: SignUpRequest):
             ],
             SecretHash=_hash(data.email),
         )
-    except cognito().exceptions.UsernameExistsException:
-        raise HTTPException(status_code=400, detail="Account already exists")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except (ClientError, BotoCoreError) as exc:
+        _raise_cognito("SignUp", exc, {
+            "UsernameExistsException":   (400, "An account with this email already exists"),
+            "InvalidPasswordException":  (400, None),
+            "InvalidParameterException": (400, None),
+        })
 
-    sub = resp.get("UserSub")
+    try:
+        upsert_user(db, cognito_sub=resp["UserSub"], email=data.email, name=data.name)
+    except SQLAlchemyError:
+        db.rollback()
+        log.exception("users row insert failed after Cognito SignUp")
+        # Undo the Cognito account so the user can simply sign up again.
+        # If this fails too, get_current_user recreates the row once the
+        # account is confirmed and used.
+        try:
+            cognito().admin_delete_user(UserPoolId=s.cognito_user_pool_id, Username=data.email)
+        except (ClientError, BotoCoreError) as exc:
+            log.error("rollback AdminDeleteUser failed: %s", type(exc).__name__)
+        raise HTTPException(500, "Could not create the user profile, please try again") from None
 
-    users_table().put_item(
-        Item={
-            "cognito_sub": sub,
-            "name":        data.name,
-            "email":       data.email,
-            "created_at":  datetime.now(timezone.utc).isoformat(),
-        },
-        ConditionExpression="attribute_not_exists(cognito_sub)",
-    )
-
-    return {
-        "message":     "Registration successful. Check email for OTP.",
-        "cognito_sub": sub,
-    }
+    return MessageResponse(message="Registration successful. Check your email for the verification code.")
 
 
-@router.post("/verify-otp")
+@router.post("/verify-otp", response_model=MessageResponse)
 def verify_otp(data: VerifyOTPRequest):
     s = get_settings()
     try:
         cognito().confirm_sign_up(
             ClientId=s.cognito_client_id,
             Username=data.email,
-            ConfirmationCode=data.otp_code,
+            ConfirmationCode=data.otp,
             SecretHash=_hash(data.email),
         )
-    except cognito().exceptions.CodeMismatchException:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
-    except cognito().exceptions.ExpiredCodeException:
-        raise HTTPException(status_code=400, detail="OTP expired")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return {"message": "Verified. You can log in now."}
+    except (ClientError, BotoCoreError) as exc:
+        _raise_cognito("ConfirmSignUp", exc, {
+            "CodeMismatchException":     (400, "Invalid verification code"),
+            "ExpiredCodeException":      (400, "Verification code expired"),
+            "NotAuthorizedException":    (400, None),  # e.g. already confirmed
+            "InvalidParameterException": (400, None),
+            "UserNotFoundException":     (404, "User not found"),
+        })
+    return MessageResponse(message="Account verified. You can log in now.")
 
 
-@router.post("/login")
+@router.post("/login", response_model=MessageResponse)
 def login(data: LoginRequest, response: Response):
     s = get_settings()
     try:
@@ -88,43 +149,78 @@ def login(data: LoginRequest, response: Response):
                 "SECRET_HASH": _hash(data.email),
             },
         )
-    except cognito().exceptions.UserNotConfirmedException:
-        raise HTTPException(status_code=403, detail="Account not verified")
-    except cognito().exceptions.NotAuthorizedException:
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except (ClientError, BotoCoreError) as exc:
+        # With prevent_user_existence_errors on the app client, Cognito
+        # reports an unknown email as NotAuthorized, so 404 is rare.
+        _raise_cognito("InitiateAuth", exc, {
+            "NotAuthorizedException":         (400, "Incorrect email or password"),
+            "UserNotConfirmedException":      (400, "Account not verified"),
+            "PasswordResetRequiredException": (400, "Password reset required"),
+            "UserNotFoundException":          (404, "Account does not exist"),
+        })
 
-    result = auth["AuthenticationResult"]
-    for name, value, max_age in (
-        ("access_token",  result["AccessToken"],  s.access_cookie_max_age),
-        ("refresh_token", result["RefreshToken"], s.refresh_cookie_max_age),
-    ):
-        response.set_cookie(
-            key=name, value=value,
-            httponly=True,
-            secure=s.cookie_secure,
-            samesite=s.cookie_samesite,
-            max_age=max_age,
+    result = auth.get("AuthenticationResult")
+    if not result:
+        raise HTTPException(400, f"Unsupported sign-in challenge: {auth.get('ChallengeName', 'unknown')}")
+
+    _set_cookie(response, ACCESS_COOKIE, result["AccessToken"], s.access_cookie_max_age, "/")
+    _set_cookie(response, REFRESH_COOKIE, result["RefreshToken"], s.refresh_cookie_max_age, REFRESH_PATH)
+    return MessageResponse(message="Login successful")
+
+
+@router.post("/refresh", response_model=MessageResponse)
+def refresh(request: Request, response: Response):
+    token = request.cookies.get(REFRESH_COOKIE)
+    if not token:
+        raise HTTPException(401, "Missing refresh token")
+
+    s = get_settings()
+    try:
+        # Takes the client secret directly, so no SECRET_HASH — which for
+        # email-username pools would need the user's sub, not their email.
+        resp = cognito().get_tokens_from_refresh_token(
+            RefreshToken=token,
+            ClientId=s.cognito_client_id,
+            ClientSecret=s.cognito_client_secret,
         )
-    return {"message": "Login successful"}
+    except (ClientError, BotoCoreError) as exc:
+        _raise_cognito("GetTokensFromRefreshToken", exc, {
+            "NotAuthorizedException":     (401, "Refresh token expired or revoked"),
+            "RefreshTokenReuseException": (401, "Refresh token expired or revoked"),
+            "UserNotFoundException":      (401, "Refresh token expired or revoked"),
+        })
+
+    result = resp["AuthenticationResult"]
+    _set_cookie(response, ACCESS_COOKIE, result["AccessToken"], s.access_cookie_max_age, "/")
+    # Present only when refresh token rotation is enabled on the app client.
+    if result.get("RefreshToken"):
+        _set_cookie(response, REFRESH_COOKIE, result["RefreshToken"], s.refresh_cookie_max_age, REFRESH_PATH)
+    return MessageResponse(message="Session refreshed")
 
 
-@router.post("/logout")
-def logout(response: Response):
-    for name in ("access_token", "refresh_token"):
-        response.delete_cookie(name)
-    return {"message": "Logged out"}
+@router.post("/logout", response_model=MessageResponse)
+def logout(request: Request, response: Response):
+    token = request.cookies.get(REFRESH_COOKIE)
+    if token:
+        s = get_settings()
+        try:
+            # Also invalidates the access tokens issued from this refresh
+            # token, which GetUser then rejects.
+            cognito().revoke_token(
+                Token=token,
+                ClientId=s.cognito_client_id,
+                ClientSecret=s.cognito_client_secret,
+            )
+        except ClientError as exc:
+            log.warning("RevokeToken failed: %s", exc.response.get("Error", {}).get("Code"))
+        except BotoCoreError as exc:
+            log.warning("RevokeToken failed: %s", type(exc).__name__)
+
+    _clear_cookie(response, ACCESS_COOKIE, "/")
+    _clear_cookie(response, REFRESH_COOKIE, REFRESH_PATH)
+    return MessageResponse(message="Logged out")
 
 
 @router.get("/me", response_model=UserProfileResponse)
-def get_me(user=Depends(get_current_user)):
-    row = users_table().get_item(Key={"cognito_sub": user["sub"]}).get("Item")
-    if not row:
-        raise HTTPException(status_code=404, detail="User profile not found")
-    return UserProfileResponse(
-        cognito_sub=row["cognito_sub"],
-        name=row["name"],
-        email=row["email"],
-        created_at=row["created_at"],
-    )
+def get_me(user: User = Depends(get_current_user)):
+    return user

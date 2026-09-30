@@ -60,6 +60,84 @@ variable "thumbnails_cors_origins" {
   default     = ["*"]
 }
 
+variable "thumbnails_cdn_price_class" {
+  description = "CloudFront price class for the thumbnails distribution. PriceClass_200 includes India edge locations."
+  type        = string
+  default     = "PriceClass_200"
+}
+
+# --- Database (RDS PostgreSQL) ---------------------------------------------
+
+variable "db_engine_version" {
+  description = "PostgreSQL version. A major version alone lets RDS pick, and auto-upgrade, the minor version."
+  type        = string
+  default     = "17"
+}
+
+variable "db_instance_class" {
+  description = "RDS instance class."
+  type        = string
+  default     = "db.t4g.micro"
+}
+
+variable "db_name" {
+  description = "Database the app connects to, created with the instance."
+  type        = string
+  default     = "videoapp"
+}
+
+variable "db_username" {
+  description = "Master user the app connects as. RDS keeps its password in Secrets Manager."
+  type        = string
+  default     = "videoapp"
+}
+
+variable "db_allocated_storage" {
+  description = "Initial gp3 storage in GiB."
+  type        = number
+  default     = 20
+}
+
+variable "db_max_allocated_storage" {
+  description = "Storage autoscaling ceiling in GiB."
+  type        = number
+  default     = 100
+}
+
+variable "db_multi_az" {
+  description = "Run a standby in a second AZ. Roughly doubles the instance cost."
+  type        = bool
+  default     = false
+}
+
+variable "db_backup_retention_days" {
+  description = "Days of automated backups (point-in-time recovery window)."
+  type        = number
+  default     = 7
+}
+
+variable "db_deletion_protection" {
+  description = "Block deleting the instance. Apply false before terraform destroy."
+  type        = bool
+  default     = true
+}
+
+# Each uvicorn worker holds its own pool, so the API's worst case is
+# 2 workers x (pool + overflow) x api_max_tasks connections. The defaults
+# (56 at 4 tasks, plus the poller's 1) stay under db.t4g.micro's limit of
+# roughly 80.
+variable "api_db_pool_size" {
+  description = "Persistent database connections per API worker."
+  type        = number
+  default     = 5
+}
+
+variable "api_db_max_overflow" {
+  description = "Extra connections an API worker may open under load."
+  type        = number
+  default     = 2
+}
+
 # --- Container image ------------------------------------------------------
 
 variable "ecr_repository_name" {
@@ -171,6 +249,12 @@ variable "refresh_cookie_max_age" {
 
 variable "presigned_url_ttl_seconds" {
   description = "Lifetime of presigned upload URLs."
+  type        = number
+  default     = 3600
+}
+
+variable "video_meta_cache_ttl_seconds" {
+  description = "How long GET /video/{id} keeps a completed video's metadata in Redis."
   type        = number
   default     = 3600
 }

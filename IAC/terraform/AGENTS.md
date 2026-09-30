@@ -1,8 +1,9 @@
 # AGENTS.md — terraform
 
 Provisions the full pipeline infra. Single `terraform apply` stands up
-network, storage, queues, cache, DB, container platform, dispatcher, Cognito,
-and the CloudFront playback distribution.
+network, storage, queues, cache, container platform, dispatcher, Cognito,
+and the CloudFront playback distribution. The application database (RDS
+PostgreSQL) belongs to `../../backend/terraform`, not here.
 
 ## Files
 
@@ -13,14 +14,13 @@ and the CloudFront playback distribution.
 | `network.tf` | `aws_vpc`, N public subnets across N AZs, IGW, public RT + associations, `egress_only` SG (workloads), `redis` SG (6379 from egress SG only) |
 | `storage.tf` | S3 raw + processed buckets (public-access blocked, force_destroy on), CORS on raw, SQS ingest queue + DLQ (redrive), SQS completion queue + DLQ, SQS→S3 send-message policy, `aws_s3_bucket_notification` filter `suffix=.mp4` |
 | `redis.tf` | `aws_elasticache_serverless_cache` (engine=redis, v7), 5 GB / 5000 eCPU limits, in redis SG + module subnets, locals expose `redis_address` / `redis_port` / `redis_uri` |
-| `dynamodb.tf` | `video-status` table (PK `video_id`, GSI `uploader-created-index`), `users` table (PK `cognito_sub`, GSI `email-index`). PAY_PER_REQUEST, PITR on. |
 | `cognito.tf` | User pool (`username_attributes=["email"]`, required `email`/`name` schema) + confidential app client (secret, `USER_PASSWORD_AUTH`, `prevent_user_existence_errors`) + SSM SecureString `/<project>/cognito/client-secret` for the backend API task |
 | `cloudfront.tf` | OAC (sigv4), distribution in front of the processed bucket (managed CachingOptimized + SimpleCORS policies, HTTPS redirect, default cert), processed bucket policy allowing only this distribution |
 | `ecr.tf` | Private ECR repo, scan-on-push, 10-image lifecycle |
 | `iam.tf` | ECS task-execution role (managed policy), ECS task role (S3 R/W on the two buckets + SendMessage on completion queue), Lambda dispatcher role (SQS receive/delete on ingest, `ecs:RunTask` on task family `:*`, `iam:PassRole` scoped by `iam:PassedToService=ecs-tasks`) |
 | `ecs.tf` | CW log group, cluster (containerInsights on), task definition with runtimePlatform, env carries Redis + completion queue coordinates |
 | `lambda.tf` | `archive_file` bundles `../lambda/`, `aws_lambda_function` (python3.12, 256 MB, 30s), CW log group, `aws_lambda_event_source_mapping` on ingest queue (batch_size, batch_window, `ReportBatchItemFailures`) |
-| `outputs.tf` | Every consumer input the backend / operator needs: VPC id + CIDR, subnet ids, bucket names, queue URLs+ARNs, redis endpoint, DDB table names, ECR URL, cluster name, task def ARN, lambda name, Cognito pool/client ids (client secret marked `sensitive`), client-secret parameter ARN, CloudFront domain + distribution id |
+| `outputs.tf` | Every consumer input the backend / operator needs: VPC id + CIDR, subnet ids, bucket names, queue URLs+ARNs, redis endpoint, ECR URL, cluster name, task def ARN, lambda name, Cognito pool/client ids (client secret marked `sensitive`), client-secret parameter ARN, CloudFront domain + distribution id |
 | `terraform.tfvars.example` | Copy → `terraform.tfvars`, fill required values |
 
 ## Conventions
@@ -28,7 +28,7 @@ and the CloudFront playback distribution.
 - **Network is provisioned in-module.** Do not add `vpc_id` /
   `subnet_ids` input vars. Directive from user; see repo memory.
 - **All resource names are variable-driven.** No literal strings for
-  bucket/queue/table names outside `variables.tf` defaults.
+  bucket/queue/cache names outside `variables.tf` defaults.
 - **Provider version pinned** to `~> 5.60`. Bump deliberately.
 - **`default_tags`** in `providers.tf` merges `{Project, ManagedBy=terraform}`
   with user `var.tags`. Do not add tags on individual resources unless

@@ -69,22 +69,6 @@ output "redis_port" {
   value = local.redis_port
 }
 
-output "dynamodb_table" {
-  value = aws_dynamodb_table.video_status.name
-}
-
-output "dynamodb_table_arn" {
-  value = aws_dynamodb_table.video_status.arn
-}
-
-output "dynamodb_users_table" {
-  value = aws_dynamodb_table.users.name
-}
-
-output "dynamodb_users_table_arn" {
-  value = aws_dynamodb_table.users.arn
-}
-
 output "raw_bucket_arn" {
   value = aws_s3_bucket.raw.arn
 }
@@ -132,7 +116,7 @@ output "cognito_client_secret_parameter_arn" {
 }
 
 output "cloudfront_domain_name" {
-  description = "Playback domain for the processed bucket. manifest_url = https://<this>/<manifest_key>."
+  description = "Playback domain for the processed bucket. The backend serves manifest_url = https://<this>/<dash_manifest_s3_key>."
   value       = aws_cloudfront_distribution.processed.domain_name
 }
 

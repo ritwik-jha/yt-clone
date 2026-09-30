@@ -17,6 +17,14 @@ pipeline_state_local_path = "../../IAC/terraform/terraform.tfstate"
 thumbnails_bucket_name  = "my-org-thumbnails"
 thumbnails_cors_origins = ["https://app.example.com"]
 
+# RDS PostgreSQL. RDS generates the password and keeps it in Secrets Manager.
+# deletion_protection blocks terraform destroy; set it false and apply first.
+db_instance_class        = "db.t4g.micro"
+db_allocated_storage     = 20
+db_multi_az              = false
+db_backup_retention_days = 7
+db_deletion_protection   = true
+
 # Container image. Deploy = push a new tag, then change image_tag and apply.
 ecr_repository_name = "video-backend"
 image_tag           = "latest"

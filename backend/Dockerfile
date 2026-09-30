@@ -13,6 +13,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY alembic.ini .
+COPY migrations ./migrations
 COPY app ./app
 
 # Both processes run from this one image; the poller service overrides the
@@ -23,6 +25,7 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", \
-     "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# The API applies pending migrations before it serves (migrations/env.py
+# serialises concurrent tasks). Keep in step with the command in
+# terraform/ecs.tf, which overrides this on ECS.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips '*'"]

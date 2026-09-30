@@ -2,7 +2,8 @@
 # so tasks get public IPs for ECR/AWS API egress.
 #
 # The API SG is passed to Express Mode, which creates the ALB and its SG. The
-# API SG is also the source on the Redis rule below. The poller SG opens no
+# API SG is also the source on the Redis rule below, and the API and poller
+# SGs are the only sources the database SG admits. The poller SG opens no
 # ingress.
 resource "aws_security_group" "api" {
   name        = "${var.backend_name}-api-sg"
@@ -51,13 +52,42 @@ resource "aws_security_group" "poller" {
   tags = { Name = "${var.backend_name}-poller-sg" }
 }
 
-# Only the API reads progress from Redis; the poller never touches it. Added
-# here rather than in the pipeline stack so ownership follows the consumer.
+# Only the API uses Redis (progress reads and the video metadata cache); the
+# poller never touches it. Added here rather than in the pipeline stack so
+# ownership follows the consumer.
 resource "aws_vpc_security_group_ingress_rule" "redis_from_api" {
   security_group_id            = local.pipeline.redis_security_group_id
   description                  = "Redis TLS from the backend API tasks"
   referenced_security_group_id = aws_security_group.api.id
   from_port                    = 6379
   to_port                      = 6379
+  ip_protocol                  = "tcp"
+}
+
+# No egress rules: RDS never initiates connections, and Terraform drops the
+# default allow-all egress rule on SGs it creates.
+resource "aws_security_group" "db" {
+  name        = "${var.backend_name}-db-sg"
+  description = "Backend PostgreSQL, API and poller tasks only"
+  vpc_id      = local.pipeline.vpc_id
+
+  tags = { Name = "${var.backend_name}-db-sg" }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "db_from_api" {
+  security_group_id            = aws_security_group.db.id
+  description                  = "PostgreSQL from the backend API tasks"
+  referenced_security_group_id = aws_security_group.api.id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "db_from_poller" {
+  security_group_id            = aws_security_group.db.id
+  description                  = "PostgreSQL from the completion poller tasks"
+  referenced_security_group_id = aws_security_group.poller.id
+  from_port                    = 5432
+  to_port                      = 5432
   ip_protocol                  = "tcp"
 }

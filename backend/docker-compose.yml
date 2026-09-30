@@ -1,6 +1,20 @@
 # Local parity only: the same two processes the ECS services run
 # (backend/terraform/ecs.tf), reading a .env from scripts/generate-env.sh.
 # BACKEND_IMAGE defaults to a locally built `video-backend:local`.
+#
+# RDS and ElastiCache are reachable only from inside the VPC, so this file
+# runs its own PostgreSQL and Redis. Neither publishes a port beyond
+# localhost, and Redis publishes none. Cognito, S3, and SQS are the real AWS
+# resources named in .env. Progress reads come from the local Redis, which
+# the transcoder never writes to, so they report 0 until a video completes.
+
+x-local-data: &local-data
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_SSLMODE: disable
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_TLS: "0"
 
 services:
   api:
@@ -8,6 +22,12 @@ services:
     container_name: video-backend-api
     restart: unless-stopped
     env_file: .env
+    environment: *local-data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     # Localhost-only so a plain `docker compose up` does not expose the API.
     ports:
       - "${API_BIND:-127.0.0.1}:8000:8000"
@@ -30,7 +50,11 @@ services:
     container_name: video-backend-poller
     restart: unless-stopped
     env_file: .env
+    environment: *local-data
     command: ["python", "-m", "app.workers.completion_poller"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     # SIGTERM is handled by the worker; give it time to finish the in-flight
     # batch rather than leaving messages invisible until the timeout lapses.
     stop_grace_period: 30s
@@ -40,3 +64,30 @@ services:
         awslogs-group: ${LOG_GROUP:-/video-backend}
         awslogs-region: ${AWS_REGION:-ap-south-1}
         awslogs-stream: poller
+
+  postgres:
+    image: public.ecr.aws/docker/library/postgres:17-alpine
+    container_name: video-backend-postgres
+    restart: unless-stopped
+    # Must match DB_NAME / DB_USER / DB_PASSWORD in .env.
+    environment:
+      POSTGRES_DB: ${DB_NAME:-videoapp}
+      POSTGRES_USER: ${DB_USER:-videoapp}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-videoapp-local}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: public.ecr.aws/docker/library/redis:7-alpine
+    container_name: video-backend-redis
+    restart: unless-stopped
+
+volumes:
+  pgdata:

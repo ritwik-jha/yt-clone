@@ -42,6 +42,21 @@ output "thumbnails_bucket" {
   value = aws_s3_bucket.thumbnails.bucket
 }
 
+output "thumbnails_cdn_domain" {
+  description = "CloudFront domain serving thumbnails; the API builds thumbnail_url from it."
+  value       = aws_cloudfront_distribution.thumbnails.domain_name
+}
+
+output "db_endpoint" {
+  description = "RDS PostgreSQL host:port. Reachable only from the API and poller tasks."
+  value       = aws_db_instance.main.endpoint
+}
+
+output "db_secret_arn" {
+  description = "Secrets Manager secret holding the RDS-managed master credentials (not the value)."
+  value       = aws_db_instance.main.master_user_secret[0].secret_arn
+}
+
 output "log_group" {
   value = aws_cloudwatch_log_group.backend.name
 }

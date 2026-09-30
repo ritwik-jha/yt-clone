@@ -1,8 +1,8 @@
 # Video Transcoding Pipeline — Deployment Guide
 
 Serverless, event-driven video transcoding pipeline on AWS with per-video
-Redis locking, progress tracking, and asynchronous SQS→DynamoDB status
-persistence via a backend poller.
+Redis locking, progress tracking, and asynchronous status reporting over
+SQS to a backend poller, which persists it in the backend's PostgreSQL.
 
 ```
 [ Client ]
@@ -18,7 +18,7 @@ persistence via a backend poller.
                                                         ▼           ▼
                                              [ ElastiCache Redis ] [ S3 processed bucket ]
                                                                     │
-                                                                    │ send completion
+                                                                    │ send status
                                                                     ▼
                                                      [ SQS completion queue ]
                                                                     │
@@ -26,9 +26,9 @@ persistence via a backend poller.
                                                                     ▼
                                                       [ Backend app poller ]
                                                                     │
-                                                                    │ PutItem / UpdateItem
+                                                                    │ guarded UPDATE
                                                                     ▼
-                                                       [ DynamoDB video-status ]
+                                             [ RDS PostgreSQL videos (backend stack) ]
 ```
 
 Key design points:
@@ -40,11 +40,11 @@ Key design points:
 - **Progress**: `SET video:progress:<video_guid> <percent>`. Written after
   each stage (5 → 25 → 80 → 95 → 100). Every progress write refreshes the
   lock TTL, so long transcodes cannot lose their lock mid-flight.
-- **Completion via SQS, not HTTP**: transcoder pushes a JSON message onto
-  the completion queue. Backend app polls it and does the DynamoDB write
-  asynchronously — the transcoder never blocks on API latency.
-- **DynamoDB PAY_PER_REQUEST**: serverless, no capacity planning; the
-  backend uses it as the durable video-status store.
+- **Status via SQS, not HTTP**: the transcoder pushes JSON messages
+  (`processing`, then `completed` or `failed`) onto the completion queue.
+  The backend poller applies them to PostgreSQL asynchronously — the
+  transcoder never blocks on API or database latency, and never holds
+  database credentials.
 
 ---
 
@@ -62,7 +62,8 @@ IAC/
 │   ├── network.tf              # VPC + public subnets + IGW + workload SG + redis SG
 │   ├── storage.tf              # S3 raw/processed + SQS ingest+DLQ + SQS completion+DLQ + S3->SQS notif
 │   ├── redis.tf                # ElastiCache Serverless Redis (locks + progress)
-│   ├── dynamodb.tf             # video-status table (backend data store)
+│   ├── cognito.tf              # User pool + app client + client-secret SSM parameter
+│   ├── cloudfront.tf           # Playback CDN (OAC) for the processed bucket
 │   ├── ecr.tf
 │   ├── iam.tf                  # ECS exec/task roles + Lambda dispatcher role
 │   ├── ecs.tf                  # Cluster + task definition
@@ -74,10 +75,10 @@ IAC/
 ├── transcoder/
 │   ├── Dockerfile              # python:3.12-slim + ffmpeg + redis client
 │   ├── requirements.txt
-│   └── transcoder.py           # lock -> download -> ffmpeg -> upload -> completion SQS
+│   └── transcoder.py           # lock -> processing SQS -> download -> ffprobe -> ffmpeg -> upload -> completion SQS
 └── deployment-guide.md         # (this file)
 
-../backend/                     # FastAPI gateway + completion poller (ECS)
+../backend/                     # FastAPI gateway + completion poller (ECS) + RDS PostgreSQL
 ```
 
 ---
@@ -92,8 +93,6 @@ All defaults live in `terraform/variables.tf`; override any of these in
 | AWS region | `aws_region` | `ap-south-1` | `terraform.tfvars` |
 | Raw S3 bucket name (globally unique) | `raw_bucket_name` | — required | `terraform.tfvars` |
 | Processed S3 bucket name (globally unique) | `processed_bucket_name` | — required | `terraform.tfvars` |
-| DynamoDB table name | `dynamodb_table_name` | `video-status` | `terraform.tfvars` |
-| DynamoDB partition key | hard-coded `video_id` (string) | — | `dynamodb.tf` if you rename |
 | Ingest SQS queue name | `sqs_queue_name` | `video-processing-queue` | `terraform.tfvars` |
 | Completion SQS queue name | `completion_queue_name` | `video-completion-queue` | `terraform.tfvars` |
 | ElastiCache Serverless cache name | `redis_cache_name` | `video-progress-cache` | `terraform.tfvars` |
@@ -130,9 +129,10 @@ All defaults live in `terraform/variables.tf`; override any of these in
   Terraform stack at `../backend/terraform/`, applied after this one. It
   provisions an ECS cluster, the API as an ECS Express Mode service (which
   creates its own HTTPS ALB and certificate), the poller as a Fargate
-  service, separate IAM roles per service (scoped to the tables, buckets,
-  queue, and Cognito secret below), their security groups, an ECR repo,
-  and the thumbnails bucket. It reads this stack's outputs via
+  service, the RDS PostgreSQL database holding users and videos, separate
+  IAM roles per service (scoped to the buckets, queue, and secrets they
+  use), their security groups, an ECR repo, and the thumbnails bucket with
+  its CloudFront distribution. It reads this stack's outputs via
   `terraform_remote_state` and does not modify anything here, except for
   one ingress rule it adds to `aws_security_group.redis` so the API tasks
   can reach the cache. Walkthrough: `../backend/deployment-guide.md`.
@@ -144,16 +144,16 @@ that serves DASH output from the private processed bucket through Origin
 Access Control, and the SSM SecureString holding the Cognito client secret
 that the backend API task reads at start.
 
-The Cognito user pool + app client (`cognito.tf`) and the `users` DynamoDB
-table it mirrors (`dynamodb.tf`) **are** both provisioned here — the pool
-uses email as the username (`username_attributes = ["email"]`), matching
-how `../backend/app/routers/auth.py` signs up, confirms, and logs in.
+The Cognito user pool + app client (`cognito.tf`) **is** provisioned here —
+the pool uses email as the username (`username_attributes = ["email"]`),
+matching how `../backend/app/routers/auth.py` signs up, confirms, and logs
+in. The `users` table that mirrors it lives in the backend's PostgreSQL.
 
 ### 1.3 Backend poller — contract
 
 Implemented by `../backend/app/workers/completion_poller.py`, run as the
-poller ECS service. It drains the completion queue
-and upserts DynamoDB:
+poller ECS service. It drains the completion queue and updates the
+backend's PostgreSQL `videos` table:
 
 - **Queue URL / ARN**: `completion_queue_url` / `completion_queue_arn`
   (Terraform outputs).
@@ -163,26 +163,30 @@ and upserts DynamoDB:
     "video_id":     "8b2e-...-9f01",
     "raw_bucket":   "my-org-raw-videos",
     "raw_key":      "raw/8b2e-...-9f01.mp4",
-    "status":       "completed" | "failed",
-    "manifest_uri": "s3://my-org-processed-videos/8b2e-.../dash/manifest.mpd",
-    "error":        "",
-    "task_token":   "arn:aws:ecs:...:task/...",
-    "timestamp":    1736467200
+    "status":           "processing" | "completed" | "failed",
+    "manifest_uri":     "s3://my-org-processed-videos/8b2e-.../dash/manifest.mpd",
+    "duration_seconds": 61,
+    "error":            "",
+    "task_token":       "arn:aws:ecs:...:task/...",
+    "timestamp":        1736467200
   }
   ```
-- **Recommended DynamoDB write**:
-  ```
-  UpdateItem  table=video-status
-              key    = { video_id: <video_id> }
-              set    status, manifest_key, manifest_url, error, updated_at = <timestamp>
-  ```
-  `manifest_key` is the S3 key parsed from `manifest_uri`; `manifest_url`
-  is `https://<cloudfront_domain_name>/<manifest_key>`, which players load.
-- **Idempotency**: use `UpdateItem` (not `PutItem`) so redelivered
-  messages just overwrite the same attributes.
-- **Progress endpoint**: for the client-facing `GET /videos/{id}/progress`
-  endpoint, the backend reads `video:progress:<video_id>` from Redis (same
-  `redis_endpoint` output). No DynamoDB round-trip needed for progress.
+  `manifest_uri` and `duration_seconds` are set only on `completed`.
+- **Write**: a guarded `UPDATE videos ... WHERE s3_key = <raw_key>`.
+  `processing` only replaces `PENDING`; `failed` never replaces
+  `COMPLETED`; `completed` stores `dash_manifest_s3_key` (the key parsed
+  from `manifest_uri`) and `duration_seconds`. The API builds
+  `https://<cloudfront_domain_name>/<dash_manifest_s3_key>` when it reads
+  the row, and players load that.
+- **Idempotency**: the guards make redelivered and out-of-order messages
+  no-ops, so the poller never moves a status backwards.
+- **Row not saved yet**: the row exists only after the client calls
+  `POST /upload/video/save`. A `processing` message with no row is dropped;
+  a `completed` or `failed` one is left on the queue to redeliver, and lands
+  in the completion DLQ if the row never appears.
+- **Progress endpoint**: `GET /video/{id}/progress` reads
+  `video:progress:<video_id>` from Redis (same `redis_endpoint` output).
+  No database round-trip beyond loading the video.
 - **Failure handling**: on any exception the message is *not* deleted —
   SQS redelivers after the visibility timeout and the DLQ catches poison
   messages after `sqs_max_receive_count` receives.
@@ -215,7 +219,7 @@ terraform apply
 ```
 
 Outputs to note: `ecr_repository_url`, `raw_bucket`, `completion_queue_url`,
-`completion_queue_arn`, `redis_endpoint`, `dynamodb_table`.
+`completion_queue_arn`, `redis_endpoint`, `cloudfront_domain_name`.
 
 > The Lambda ships with a placeholder ECR image reference on the first
 > apply. `ecs:RunTask` will fail until Step 3 pushes the image. Expected.
@@ -252,16 +256,17 @@ terraform apply -target=aws_ecr_repository.backend   # repo first, so there is s
 
 cd ..
 scripts/push-image.sh <tag>                    # build + push the backend image (linux/amd64)
-terraform -chdir=terraform apply -var image_tag=<tag>   # cluster, API + poller services, IAM, SGs
+terraform -chdir=terraform apply -var image_tag=<tag>   # RDS, cluster, API + poller services, IAM, SGs, thumbnails CDN
 ```
 
 That stack reads the outputs from Step 2 through `terraform_remote_state`,
 so nothing is copied by hand. It also adds the one ingress rule that lets
-the API tasks reach `redis_endpoint` on 6379.
+the API tasks reach `redis_endpoint` on 6379. The API applies its database
+migrations when it starts.
 
 ### Step 5 — Smoke test
 
-Filename stem becomes `VIDEO_ID`:
+This exercises the pipeline alone. Filename stem becomes `VIDEO_ID`:
 
 ```bash
 cd IAC   # if currently in backend/, use: cd ../IAC
@@ -285,14 +290,16 @@ redis-cli --tls -h <redis_endpoint host> -p 6379 GET video:progress:$VIDEO_ID
 # Completion message on the queue (before your poller drains it)
 aws sqs receive-message --queue-url "$(terraform -chdir=../terraform output -raw completion_queue_url)"
 
-# DynamoDB row (after poller writes)
-aws dynamodb get-item \
-  --table-name "$(terraform -chdir=../terraform output -raw dynamodb_table)" \
-  --key "{\"video_id\": {\"S\": \"$VIDEO_ID\"}}"
-
 # Processed output
 aws s3 ls "s3://$(terraform -chdir=../terraform output -raw processed_bucket)/$VIDEO_ID/dash/"
 ```
+
+An upload made this way has no `videos` row, because only
+`POST /upload/video/save` creates one. Once the backend poller is running
+it drops the `processing` message and leaves the `completed` one to
+redeliver until it reaches the completion DLQ. To see a row reach
+`COMPLETED`, upload through the API instead
+(`../backend/deployment-guide.md`).
 
 ---
 
@@ -319,7 +326,9 @@ cd ../../IAC/terraform && terraform destroy
 ```
 
 S3 buckets have `force_destroy = true`. ECR is not force-deleted — run
-`aws ecr batch-delete-image` first if it blocks `destroy`.
+`aws ecr batch-delete-image` first if it blocks `destroy`. The backend's
+RDS instance has deletion protection on by default, so its `destroy` fails
+until you turn that off; `../backend/deployment-guide.md` covers the steps.
 
 ---
 
@@ -342,10 +351,10 @@ S3 buckets have `force_destroy = true`. ECR is not force-deleted — run
 - **Duplicate dispatches are safe**: SQS at-least-once + Lambda partial-
   batch means occasional replays. The Redis lock in the transcoder
   suppresses duplicate work; a duplicate dispatch just exits cleanly.
-- **DynamoDB write cadence**: the backend poller is the sole DynamoDB
-  writer, decoupling burst write pressure from the transcoder fleet.
-  With PAY_PER_REQUEST billing there's no capacity ceiling to breach on
-  spikes.
+- **Status write cadence**: the backend poller is the only writer of
+  processing status, one message at a time, so a burst of completions
+  from the transcoder fleet queues up in SQS instead of hitting the
+  database at once.
 - **ARM64 vs X86_64**: `cpu_architecture` must match the platform you
   `docker buildx --platform` for. Mismatch = task fails with `exec
   format error`.

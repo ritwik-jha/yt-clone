@@ -1,14 +1,15 @@
 # AGENTS.md — transcoder (Fargate container)
 
 Ephemeral Fargate container: one Fargate task per video. Grabs a Redis
-lock, downloads the raw MP4, runs ffmpeg to produce a 3-rendition
-MPEG-DASH ladder, uploads to the processed bucket, sends a completion
-message to SQS, and exits.
+lock, reports "processing", downloads the raw MP4, probes its duration,
+runs ffmpeg to produce a 3-rendition MPEG-DASH ladder, uploads to the
+processed bucket, sends a completion message to SQS, and exits.
 
 ## Files
 
 - `transcoder.py` — entrypoint. All lifecycle logic.
-- `Dockerfile` — `python:3.12-slim-bookworm` + `apt install ffmpeg` +
+- `Dockerfile` — `python:3.12-slim-bookworm` + `apt install ffmpeg` (which
+  also provides `ffprobe`) +
   `pip install -r requirements.txt` + `ENTRYPOINT python /app/transcoder.py`.
 - `requirements.txt` — `boto3`, `redis`.
 - `.dockerignore` — excludes `__pycache__`, `.venv`, `.git`, etc.
@@ -19,18 +20,26 @@ message to SQS, and exits.
 2. **Acquire lock** — `SET video:lock:<VIDEO_ID> <task_token> NX EX 1800`.
    If it fails, another worker owns the video → exit `0` cleanly (do not
    fail the ECS task; SQS will not redrive).
-3. **Download** raw MP4 to `/tmp/transcode/<VIDEO_ID>/input.mp4`.
+3. **Report processing** — a `status=processing` message to
+   `COMPLETION_QUEUE_URL`. Best effort: a send failure is logged and the
+   transcode continues, because the terminal message carries everything the
+   backend needs.
+4. **Download** raw MP4 to `/tmp/transcode/<VIDEO_ID>/input.mp4`.
    Progress = 5 → 25.
-4. **ffmpeg** — 3-rendition x264 ladder (1080p / 720p / 480p) + AAC audio,
+5. **Probe duration** — `ffprobe` on the input, rounded to whole seconds.
+   Non-fatal: `None` if ffprobe fails or reports no duration.
+6. **ffmpeg** — 3-rendition x264 ladder (1080p / 720p / 480p) + AAC audio,
    DASH-muxed with 4s segments, template-based init/media naming.
    Progress = 80.
-5. **Upload** every file under `/tmp/transcode/<VIDEO_ID>/dash/` to
+7. **Upload** every file under `/tmp/transcode/<VIDEO_ID>/dash/` to
    `s3://<PROCESSED_BUCKET>/<VIDEO_ID>/dash/*` with correct content-types
    (`application/dash+xml` for `.mpd`, `video/iso.segment` for `.m4s`).
    Progress = 95.
-6. **Send completion message** to `COMPLETION_QUEUE_URL` with the payload
-   below. Progress = 100.
-7. **Release lock** via compare-and-delete Lua (releases only if we still
+8. **Send completion message** (`status=completed`, with `manifest_uri`
+   and `duration_seconds`) to `COMPLETION_QUEUE_URL`. Progress = 100. Any
+   failure in steps 4–7 sends `status=failed` with `error` instead, and the
+   task exits non-zero.
+9. **Release lock** via compare-and-delete Lua (releases only if we still
    own it). Runs in `finally`.
 
 ## Redis semantics
@@ -46,25 +55,31 @@ message to SQS, and exits.
 - Release uses Lua `if get==token then del end` so a stale worker whose
   lock already expired cannot delete the new owner's lock.
 
-## Completion message schema
+## Status message schema
 
-Sent to `COMPLETION_QUEUE_URL` via `sqs.send_message`:
+Sent to `COMPLETION_QUEUE_URL` via `sqs.send_message` (`send_status()`):
 
 ```json
 {
-  "video_id":     "<VIDEO_ID>",
-  "raw_bucket":   "<S3_BUCKET>",
-  "raw_key":      "<S3_KEY>",
-  "status":       "completed" | "failed",
-  "manifest_uri": "s3://<PROCESSED_BUCKET>/<VIDEO_ID>/dash/manifest.mpd",
-  "error":        "<empty on success>",
-  "task_token":   "<lock owner token>",
-  "timestamp":    <unix seconds>
+  "video_id":         "<VIDEO_ID>",
+  "raw_bucket":       "<S3_BUCKET>",
+  "raw_key":          "<S3_KEY>",
+  "status":           "processing" | "completed" | "failed",
+  "manifest_uri":     "s3://<PROCESSED_BUCKET>/<VIDEO_ID>/dash/manifest.mpd",
+  "duration_seconds": <int, or null>,
+  "error":            "<empty unless failed>",
+  "task_token":       "<lock owner token>",
+  "timestamp":        <unix seconds>
 }
 ```
 
-Message attributes: `video_id`, `status` (both String). The backend
-poller reads these for coarse routing without JSON-parsing the body.
+`manifest_uri` and `duration_seconds` are set only on `completed`. The
+backend poller matches the `videos` row on `raw_key` (the row's `s3_key`)
+and never moves a status backwards, so duplicate or out-of-order messages
+are harmless.
+
+Message attributes: `video_id`, `status` (both String), for filtering and
+debugging; the poller reads the JSON body.
 
 ## Env contract
 
@@ -93,7 +108,8 @@ Task role (`terraform/iam.tf::aws_iam_role.ecs_task`) needs:
 - `s3:ListBucket` on both buckets
 - `sqs:SendMessage` on the completion queue
 
-No DynamoDB or Cognito permissions — those belong to the backend.
+No database, Secrets Manager, or Cognito permissions — those belong to the
+backend.
 
 ## Building the image
 
@@ -119,5 +135,6 @@ task fails on start with `exec format error`.
   failure.
 - **Don't** call the backend API directly (no HTTP callbacks — the
   completion path is SQS only).
-- **Don't** read/write DynamoDB. Ownership sits with the backend.
+- **Don't** connect to the backend's PostgreSQL. Status reaches it only
+  through the completion queue.
 - **Don't** widen the task role beyond the four permissions above.

@@ -58,8 +58,9 @@ REDIS_HOST / REDIS_PORT  passed through
   dispatcher's sole job is `ecs:RunTask`.
 - **Do** bump `terraform.tf.lambda_timeout_seconds` (and 6× ingest queue
   visibility) if you add work per record.
-- **Don't** call SQS/DynamoDB from here. Status writes belong to the
-  backend poller; deduplication belongs to the transcoder's Redis lock.
+- **Don't** send status messages or touch the backend's database from here.
+  Status writes belong to the backend poller; deduplication belongs to the
+  transcoder's Redis lock.
 - **Don't** hard-code cluster / task family. Everything comes from env.
 
 ## Local sanity check

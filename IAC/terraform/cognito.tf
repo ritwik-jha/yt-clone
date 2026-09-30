@@ -1,6 +1,6 @@
 # Identity provider for the backend. Cognito is the source of truth for
-# credentials; the `users` DynamoDB table (dynamodb.tf) is a mirror keyed by
-# cognito_sub, never a second copy of the password.
+# credentials; the backend's PostgreSQL `users` table (backend/terraform) is
+# a profile mirror keyed by cognito_sub, never a second copy of the password.
 #
 # username_attributes = ["email"] because backend/app/routers/auth.py signs
 # up, confirms, and logs in with Username=<email> throughout — the pool must
@@ -36,7 +36,7 @@ resource "aws_cognito_user_pool" "this" {
   }
 
   # email is implied by username_attributes; name is required because
-  # signup() always sends it and the users-table mirror has no default.
+  # signup() always sends it and users.name in PostgreSQL is NOT NULL.
   schema {
     name                = "email"
     attribute_data_type = "String"
