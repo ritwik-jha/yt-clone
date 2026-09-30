@@ -17,15 +17,16 @@ infrastructure only.
 .
 ├── backend/                       FastAPI gateway + SQS completion poller
 │   ├── app/                       routers, schemas, config, boto3/redis clients
-│   ├── terraform/                 EC2, IAM, SG, ECR, SSM env param, thumbnails bucket
-│   ├── scripts/                   generate-env / push-image / deploy
+│   ├── terraform/                 ECS Express API + poller service, IAM, SGs, ECR, thumbnails bucket
+│   ├── scripts/                   generate-env (local) / push-image
 │   ├── Dockerfile, docker-compose.yml
 │   ├── deployment-guide.md        Deploy walkthrough (run after the pipeline)
 │   └── README.md / AGENTS.md
 │
 ├── IAC/                           The transcoding pipeline
 │   ├── terraform/                 VPC, S3 x2, SQS x2 + DLQs, ECR, ECS, IAM,
-│   │                              Lambda, ElastiCache Redis, DynamoDB x2
+│   │                              Lambda, ElastiCache Redis, DynamoDB x2,
+│   │                              Cognito, CloudFront (processed bucket)
 │   ├── lambda/                    SQS -> ecs:RunTask dispatcher
 │   ├── transcoder/                Fargate container (ffmpeg -> DASH)
 │   ├── deployment-guide.md        Step-by-step deploy walkthrough
@@ -36,7 +37,7 @@ infrastructure only.
 
 `backend/` is deliberately a sibling of `IAC/`, not a child: it is
 application code with its own deploy cadence and its own Terraform state. It
-owns the instance it runs on and nothing in the pipeline, reading the
+owns the ECS services it runs as and nothing in the pipeline, reading the
 pipeline stack's outputs through `terraform_remote_state`. Apply `IAC/`
 first, `backend/` second; destroy in reverse.
 
@@ -69,7 +70,7 @@ Client --presigned PUT--> S3 raw bucket
                                                                     |
                                                                     | long-poll
                                                                     v
-                                                  backend poller container (EC2)
+                                                  backend poller (ECS service)
                                                                     |
                                                                     | UpdateItem (idempotent)
                                                                     v
@@ -77,6 +78,8 @@ Client --presigned PUT--> S3 raw bucket
                                                                     ^
 Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET video:progress:<id> --> Redis
                                                                     +-> GetItem --> DynamoDB
+
+Client --GET manifest_url (dash player)--> CloudFront --OAC--> S3 processed bucket
 ```
 
 Transcode output is a DASH ladder at 1080p / 720p / 480p plus a 128 kbps
@@ -118,11 +121,13 @@ stereo AAC track, 4-second segments.
 | DynamoDB `video-status` + `users` | `IAC/terraform/dynamodb.tf` |
 | ECR repo, ECS cluster + task definition, CW log group | `IAC/terraform/{ecr,ecs}.tf` |
 | Lambda dispatcher + event source mapping | `IAC/terraform/lambda.tf` |
-| EC2 instance, instance profile, security group | `backend/terraform/ec2.tf`, `iam.tf`, `network.tf` |
-| ECR repo for the backend image, `.env` SSM parameter, log group | `backend/terraform/{ecr,ssm,logs}.tf` |
+| CloudFront distribution + OAC for the processed bucket | `IAC/terraform/cloudfront.tf` |
+| Backend ECS cluster, Express Mode API service (creates its HTTPS ALB), poller service | `backend/terraform/ecs.tf` |
+| Per-service execution/task roles, Express infrastructure role, SGs | `backend/terraform/{iam,network}.tf` |
+| ECR repo for the backend image, log group | `backend/terraform/{ecr,logs}.tf` |
 | S3 thumbnails bucket | `backend/terraform/storage.tf` |
-| Cognito user pool + app client | `IAC/terraform/cognito.tf` |
-| **ALB / TLS certificate in front of the backend** | manual / separate module |
+| Cognito user pool + app client, client-secret SSM parameter | `IAC/terraform/cognito.tf` |
+| **Custom domain for the API or CloudFront** | not provisioned (AWS-issued `*.on.aws` / `*.cloudfront.net`) |
 
 The Cognito app client has a secret and `USER_PASSWORD_AUTH` enabled, or
 `initiate_auth` would reject the computed `SECRET_HASH`. The pool uses email
@@ -147,13 +152,14 @@ Backend, after the pipeline is up — see `backend/deployment-guide.md`:
 
 ```bash
 cd backend/terraform && cp terraform.tfvars.example terraform.tfvars
-terraform init && terraform apply
-cd .. && scripts/push-image.sh && scripts/generate-env.sh --push-ssm
+terraform init -upgrade && terraform apply -target=aws_ecr_repository.backend
+cd .. && scripts/push-image.sh <tag>
+terraform -chdir=terraform apply -var image_tag=<tag>
 ```
 
-The two containers (`api`, `poller`) run from one image on a single EC2
-instance. `scripts/generate-env.sh` derives the whole `.env`, Cognito
-included, from both stacks' Terraform state — nothing is supplied by hand.
+The two services (`api`, `poller`) run from one image. Their environment is
+built by `backend/terraform/ecs.tf` from both stacks' Terraform state, and the
+Cognito client secret is injected from SSM. Nothing is supplied by hand.
 
 Backend locally:
 
@@ -162,8 +168,8 @@ cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env && uvicorn app.main:app --reload
 ```
 
-Defaults: region `ap-south-1`, ARM64 container image. Both are overridable
-in `terraform.tfvars`.
+Defaults: region `ap-south-1` (overridable in `terraform.tfvars`), ARM64
+transcoder image, x86_64 backend image.
 
 ---
 
@@ -180,7 +186,7 @@ divergences:
 | `s3-upload-and-metadata-guide.md` | PostgreSQL video metadata | DynamoDB `video-status` table |
 | `ecs-sqs-deployment-guide.md` | Long-running Python SQS consumer daemon dispatches tasks | Lambda event source mapping dispatches tasks |
 | `ecs-task-definition-spec.md` | Hand-written `task-definition.json` | `aws_ecs_task_definition` in `IAC/terraform/ecs.tf` |
-| several | Backend processes under systemd in a venv | Docker containers, provisioned by `backend/terraform` |
+| several | Backend processes under systemd in a venv | ECS services (Express Mode API + Fargate poller), provisioned by `backend/terraform` |
 | several | Flutter client flows | no client in this repo |
 
 `video-streaming-scaling-and-bottlenecks.md` is forward-looking analysis

@@ -1,8 +1,12 @@
-# Instance SG. Lives in the pipeline's VPC so the instance can reach the
-# ElastiCache cluster over private addressing.
-resource "aws_security_group" "backend" {
-  name        = "${var.backend_name}-sg"
-  description = "Backend API + completion poller instance"
+# Both services run in the pipeline VPC's public subnets (the VPC has no NAT),
+# so tasks get public IPs for ECR/AWS API egress.
+#
+# The API SG is passed to Express Mode, which creates the ALB and its SG. The
+# API SG is also the source on the Redis rule below. The poller SG opens no
+# ingress.
+resource "aws_security_group" "api" {
+  name        = "${var.backend_name}-api-sg"
+  description = "Backend API tasks"
   vpc_id      = local.pipeline.vpc_id
 
   egress {
@@ -13,40 +17,46 @@ resource "aws_security_group" "backend" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "${var.backend_name}-sg" }
+  tags = { Name = "${var.backend_name}-api-sg" }
 }
 
-# Both ingress rules are opt-in and default to absent: with no CIDRs set, the
-# only way onto the box is SSM Session Manager, which needs no open port.
-resource "aws_vpc_security_group_ingress_rule" "api" {
-  count = length(var.api_ingress_cidrs)
-
-  security_group_id = aws_security_group.backend.id
-  description       = "API port"
-  cidr_ipv4         = var.api_ingress_cidrs[count.index]
+# The Express Mode infrastructure role can only add rules to SGs tagged
+# AmazonECSManaged=true, so it cannot open this SG to its ALB, and AWS does
+# not document whether it still attaches its own service SG when one is
+# supplied. Admitting the container port from the VPC CIDR lets the ALB
+# (which sits in this VPC) reach the tasks either way. Internet traffic to the
+# tasks' public IPs never carries a VPC source address, so it stays blocked.
+resource "aws_vpc_security_group_ingress_rule" "api_from_vpc" {
+  security_group_id = aws_security_group.api.id
+  description       = "API container port from the Express Mode ALB"
+  cidr_ipv4         = local.pipeline.vpc_cidr
   from_port         = var.api_port
   to_port           = var.api_port
   ip_protocol       = "tcp"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "ssh" {
-  count = length(var.ssh_ingress_cidrs)
+resource "aws_security_group" "poller" {
+  name        = "${var.backend_name}-poller-sg"
+  description = "Completion poller tasks, egress only"
+  vpc_id      = local.pipeline.vpc_id
 
-  security_group_id = aws_security_group.backend.id
-  description       = "SSH"
-  cidr_ipv4         = var.ssh_ingress_cidrs[count.index]
-  from_port         = 22
-  to_port           = 22
-  ip_protocol       = "tcp"
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.backend_name}-poller-sg" }
 }
 
-# The pipeline's redis SG only admits the Fargate/Lambda egress SG. Add the
-# backend SG as a second source instead of editing the pipeline stack, so
-# ownership of the rule follows ownership of the instance.
-resource "aws_vpc_security_group_ingress_rule" "redis_from_backend" {
+# Only the API reads progress from Redis; the poller never touches it. Added
+# here rather than in the pipeline stack so ownership follows the consumer.
+resource "aws_vpc_security_group_ingress_rule" "redis_from_api" {
   security_group_id            = local.pipeline.redis_security_group_id
-  description                  = "Redis TLS from the backend instance"
-  referenced_security_group_id = aws_security_group.backend.id
+  description                  = "Redis TLS from the backend API tasks"
+  referenced_security_group_id = aws_security_group.api.id
   from_port                    = 6379
   to_port                      = 6379
   ip_protocol                  = "tcp"

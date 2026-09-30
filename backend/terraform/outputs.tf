@@ -2,22 +2,30 @@ output "aws_region" {
   value = var.aws_region
 }
 
-output "instance_id" {
-  description = "Target for `aws ssm start-session`."
-  value       = aws_instance.backend.id
+output "api_url" {
+  description = "HTTPS endpoint Express Mode assigned to the API (ALB, AWS-issued certificate)."
+  value       = try("https://${aws_ecs_express_gateway_service.api.ingress_paths[0].endpoint}", null)
 }
 
-output "public_ip" {
-  value = var.associate_eip ? aws_eip.backend[0].public_ip : aws_instance.backend.public_ip
+output "ecs_cluster" {
+  value = aws_ecs_cluster.backend.name
 }
 
-output "private_ip" {
-  value = aws_instance.backend.private_ip
+output "api_service_name" {
+  value = aws_ecs_express_gateway_service.api.service_name
 }
 
-output "security_group_id" {
-  description = "Attach this as the source on an ALB SG rule if you front the instance."
-  value       = aws_security_group.backend.id
+output "api_service_arn" {
+  value = aws_ecs_express_gateway_service.api.service_arn
+}
+
+output "poller_service_name" {
+  value = aws_ecs_service.poller.name
+}
+
+output "api_security_group_id" {
+  description = "Extra SG on the API tasks; the Redis ingress rule references it."
+  value       = aws_security_group.api.id
 }
 
 output "ecr_repository_url" {
@@ -26,13 +34,8 @@ output "ecr_repository_url" {
 }
 
 output "backend_image" {
-  description = "Exact image reference the instance pulls."
+  description = "Exact image reference both services run."
   value       = local.backend_image
-}
-
-# Consumed by backend/scripts/generate-env.sh.
-output "env_ssm_parameter" {
-  value = aws_ssm_parameter.backend_env.name
 }
 
 output "thumbnails_bucket" {

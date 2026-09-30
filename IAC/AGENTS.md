@@ -11,8 +11,9 @@ See `../backend/AGENTS.md`.
 
 ```
 IAC/
-├── terraform/     Provision ALL AWS infra (VPC, S3, SQS, ECR, ECS,
-│                  IAM, Lambda, ElastiCache Redis, DynamoDB).
+├── terraform/     Provision all pipeline infra (VPC, S3, SQS, ECR, ECS,
+│                  IAM, Lambda, ElastiCache Redis, DynamoDB, Cognito,
+│                  CloudFront + OAC for the processed bucket).
 │                  Self-contained: creates its own VPC + subnets.
 ├── lambda/        SQS-triggered dispatcher. Reads S3 ObjectCreated
 │                  events, invokes ecs:RunTask with per-message env
@@ -50,7 +51,7 @@ Client --presigned PUT--> S3 raw bucket
                                                                     |
                                                                     | long-poll
                                                                     v
-                                                  Backend completion_poller (EC2)
+                                                  Backend completion_poller (ECS service)
                                                                     |
                                                                     | UpdateItem (idempotent)
                                                                     v
@@ -58,6 +59,8 @@ Client --presigned PUT--> S3 raw bucket
                                                                     ^
 Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET video:progress:<id> --> Redis
                                                                     +-> GetItem --> DynamoDB
+
+Client --GET manifest_url--> CloudFront --OAC--> S3 processed bucket
 ```
 
 ## Key design invariants
@@ -88,7 +91,8 @@ Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET vid
 | Resource | Provisioned by | Consumed by |
 |---|---|---|
 | VPC + subnets + IGW + workload SG + redis SG | `terraform/network.tf` | Fargate, Redis |
-| S3 raw + processed buckets | `terraform/storage.tf` | Client (presigned PUT), transcoder |
+| S3 raw + processed buckets | `terraform/storage.tf` | Client (presigned PUT), transcoder, CloudFront |
+| CloudFront + OAC + processed bucket policy | `terraform/cloudfront.tf` | Client (DASH playback) |
 | S3 thumbnails bucket | `../backend/terraform/storage.tf` | Client (presigned PUT) |
 | SQS ingest queue + DLQ | `terraform/storage.tf` | Lambda dispatcher |
 | SQS completion queue + DLQ | `terraform/storage.tf` | Transcoder (send), backend poller (receive) |
@@ -97,9 +101,9 @@ Client --GET /videos/{id}/progress-------------------> FastAPI backend --GET vid
 | ECR repo | `terraform/ecr.tf` | ECS |
 | ECS cluster + task def + CW log group | `terraform/ecs.tf` | Lambda dispatcher |
 | Lambda dispatcher + ESM | `terraform/lambda.tf` | SQS ingest queue |
-| Cognito user pool + app client | `terraform/cognito.tf` | Backend |
-| EC2 instance + instance profile + SG + ECR + SSM env param | `../backend/terraform/` | Backend + poller |
-| ALB / TLS certificate | **manual / separate** | Backend |
+| Cognito user pool + app client + client-secret SSM parameter | `terraform/cognito.tf` | Backend API |
+| Backend ECS cluster, Express Mode API (+ its ALB/cert), poller service, IAM, SGs, ECR | `../backend/terraform/` | Backend + poller |
+| Custom domains (API, CloudFront) | **manual / separate** | Backend, clients |
 
 Anything marked "manual / separate" is intentionally out of scope for both
 stacks — noted in `deployment-guide.md` and `../backend/deployment-guide.md`.

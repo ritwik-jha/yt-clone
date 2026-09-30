@@ -11,6 +11,5 @@ __pycache__/
 .ruff_cache/
 terraform/
 scripts/
-systemd/
 *.md
 .DS_Store

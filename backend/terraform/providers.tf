@@ -2,8 +2,9 @@ terraform {
   required_version = ">= 1.5.0"
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.60"
+      source = "hashicorp/aws"
+      # aws_ecs_express_gateway_service first shipped in the 6.x line.
+      version = "~> 6.23"
     }
   }
 }
@@ -29,11 +30,11 @@ locals {
   # Nothing here re-declares a VPC, bucket, queue, table, or cache.
   pipeline = data.terraform_remote_state.pipeline.outputs
 
-  backend_image = "${local.account_id}.dkr.ecr.${local.region}.amazonaws.com/${var.ecr_repository_name}:${var.image_tag}"
+  backend_image = "${aws_ecr_repository.backend.repository_url}:${var.image_tag}"
 }
 
 # The pipeline stack owns the region; a mismatch here would silently point the
-# instance at cross-region queues and tables.
+# services at cross-region queues and tables.
 check "region_matches_pipeline" {
   assert {
     condition     = var.aws_region == local.pipeline.aws_region

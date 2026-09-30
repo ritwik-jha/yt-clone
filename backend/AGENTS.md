@@ -1,15 +1,17 @@
-# AGENTS.md — backend (FastAPI, Dockerized on EC2)
+# AGENTS.md — backend (FastAPI on ECS Fargate)
 
-FastAPI gateway for the video platform. Two containers on one EC2 instance,
-built from a single image and sharing one `.env`:
+FastAPI gateway for the video platform. Two ECS services built from a single
+image:
 
-1. **`api`** — HTTP API (uvicorn, 2 workers).
-2. **`poller`** — drains the transcoder's completion SQS queue and writes
-   `video-status` DynamoDB rows.
+1. **`api`** — HTTP API (uvicorn, 2 workers). ECS Express Mode service behind
+   the internet-facing HTTPS ALB that Express Mode creates.
+2. **`poller`** — plain Fargate service. Drains the transcoder's completion
+   SQS queue and writes `video-status` DynamoDB rows.
 
 Lives at the repo root, a sibling of `../IAC/` (Terraform + dispatcher
 Lambda + Fargate transcoder). It owns the infrastructure it runs *on*
-(`terraform/` here: EC2, IAM, SG, ECR, SSM, thumbnails bucket, log group)
+(`terraform/` here: ECS cluster and services, IAM, SGs, ECR, thumbnails
+bucket, log group)
 and nothing in the pipeline — those coordinates arrive via
 `terraform_remote_state`. Deployed on its own cadence: the pipeline stack is
 applied first, then this one.
@@ -31,15 +33,12 @@ backend/
 │   │   └── videos.py           /videos/{mine, {id}, {id}/progress}
 │   └── workers/
 │       └── completion_poller.py  SQS -> DDB drainer (its own container)
-├── terraform/                  EC2 stack; see terraform/AGENTS.md
+├── terraform/                  ECS stack; see terraform/AGENTS.md
 ├── scripts/
-│   ├── generate-env.sh         terraform state -> .env (+ --push-ssm)
-│   ├── push-image.sh           buildx -> ECR
-│   └── deploy.sh               runs ON the instance; SSM env -> pull -> compose up
-├── systemd/
-│   └── video-backend.service   oneshot unit wrapping deploy.sh
+│   ├── generate-env.sh         terraform state -> .env (local dev only)
+│   └── push-image.sh           buildx (linux/amd64) -> ECR
 ├── Dockerfile                  one image, both processes
-├── docker-compose.yml          api + poller
+├── docker-compose.yml          api + poller, local parity only
 ├── requirements.txt
 ├── .env.example
 ├── deployment-guide.md
@@ -65,23 +64,25 @@ backend/
 
 ## Config
 
-All config is env-driven via `pydantic_settings.BaseSettings`. In containers
-the values arrive as process environment (compose `env_file`), so the
-`env_file=".env"` setting only matters for local runs.
+All config is env-driven via `pydantic_settings.BaseSettings`.
 
-`.env` is **generated, not hand-written** — `scripts/generate-env.sh` reads
-the pipeline and backend Terraform states and fills in every infrastructure
-value, Cognito included (`IAC/terraform/cognito.tf`). Only policy knobs
-(CORS, cookies, TTLs) are carried over from the previous file / environment /
-`.env.example`. If you
-add a setting to `config.py`, add it to `.env.example` **and** to the emit
-block in `generate-env.sh`, or it will be silently dropped on the next
-regeneration.
+- **ECS:** task environment comes from `local.api_environment` /
+  `local.poller_environment` in `terraform/ecs.tf`, built from both stacks'
+  state. There is no `.env` in production.
+- **Local:** `scripts/generate-env.sh` writes `.env` from the same Terraform
+  states. Policy knobs (CORS, cookies, TTLs) are carried over from the
+  previous file / environment / `.env.example`.
 
-Sensitive: `COGNITO_CLIENT_SECRET`. The whole `.env` is stored as an SSM
-SecureString (`/video-backend/env`) and pulled by `deploy.sh` at start. It is
-gitignored, written mode 600, and excluded by `.dockerignore` — never COPY it
-into the image and never put it in Terraform.
+Settings default to empty, and each entrypoint calls `Settings.require(...)`
+for the ones it needs: `main.py` for Cognito, buckets, and Redis; the poller
+for `COMPLETION_QUEUE_URL` and `CLOUDFRONT_DOMAIN`. A missing value fails at
+startup, not on first request.
+
+Sensitive: `COGNITO_CLIENT_SECRET`. In ECS it is injected from the pipeline's
+SSM SecureString (`/<project>/cognito/client-secret`) via the container
+`secret` block, and only the API execution role can read it. The local `.env`
+is gitignored, written mode 600, and excluded by `.dockerignore`. Never COPY
+it into the image.
 
 ## Data ownership
 
@@ -94,8 +95,8 @@ into the image and never put it in Terraform.
   - `POST /upload/video/save` writes initial row with
     `status=PROCESSING` (via `PutItem` with condition
     `attribute_not_exists(video_id)`).
-  - `completion_poller` writes terminal status + `manifest_uri` +
-    `error` (via idempotent `UpdateItem`).
+  - `completion_poller` writes terminal status + `manifest_key` +
+    `manifest_url` + `error` (via idempotent `UpdateItem`).
 - **Redis `video:progress:<id>`** — read-only for the backend.
   Transcoder is the sole writer. Never mint progress values in the
   backend.
@@ -105,7 +106,8 @@ into the image and never put it in Terraform.
 - App client MUST have a **client secret** and `USER_PASSWORD_AUTH`
   enabled — otherwise `initiate_auth` rejects the `SECRET_HASH`.
 - HTTPOnly cookies are set on login. `Secure`/`SameSite` come from
-  `.env` (`COOKIE_SECURE`, `COOKIE_SAMESITE`).
+  `COOKIE_SECURE` / `COOKIE_SAMESITE`: the `cookie_secure` /
+  `cookie_samesite` tfvars in ECS, `.env` locally.
 - `get_current_user` prefers the `access_token` cookie, falls back to
   `Authorization: Bearer <token>` for mobile clients that can't hold
   cookies. Both paths validate via Cognito `GetUser`.
@@ -116,49 +118,58 @@ into the image and never put it in Terraform.
 - For each message, JSON-parse and `UpdateItem` on `video-status`:
 
   ```
-  SET status = <upper(status)>, manifest_uri = <m>, error = <e>, updated_at = <iso>
+  SET status = <upper(status)>, manifest_key = <k>, manifest_url = <m>, error = <e>, updated_at = <iso>
   ```
+
+  The transcoder sends `manifest_uri` as `s3://<processed>/<key>`. The poller
+  stores the key and `https://<CLOUDFRONT_DOMAIN>/<key>`. Clients play
+  `manifest_url`; the processed bucket is private and CloudFront reads it
+  through OAC.
 
 - On success → `delete_message`.
 - On any exception → **do NOT** delete; SQS redelivers after visibility
   timeout, DLQ catches poison messages after `max_receive_count` (3 in
   terraform default).
-- SIGINT/SIGTERM handled cleanly; compose gives it a 30s
-  `stop_grace_period` so an in-flight batch finishes instead of going
-  invisible until the timeout lapses.
+- SIGINT/SIGTERM handled cleanly; the task definition sets a 30s
+  `stopTimeout` (compose: `stop_grace_period`) so an in-flight batch finishes
+  instead of going invisible until the timeout lapses.
 
-## EC2 IAM (instance profile)
+## IAM
 
-Defined in `terraform/iam.tf`, not by hand:
+Defined in `terraform/iam.tf`, not by hand. Each service has its own pair:
 
-- `cognito-idp:{SignUp, ConfirmSignUp, InitiateAuth, GetUser}` on the
-  user pool ARN (`local.pipeline.cognito_user_pool_arn`).
-- `dynamodb:{GetItem, PutItem, UpdateItem, Query}` on both tables and
-  their `index/*`.
-- `s3:PutObject` on `raw-bucket/videos/*` and `thumbnails-bucket/thumbnails/*`
-  (grants the presigned URLs authority).
-- `sqs:{ReceiveMessage, DeleteMessage, GetQueueAttributes}` on the
-  completion queue.
-- `ssm:GetParameter` + `kms:Decrypt` (scoped by `kms:ViaService`) for the
-  `.env` parameter.
-- ECR pull on the backend repo, `logs:{CreateLogStream, PutLogEvents}` on
-  `/video-backend`, and `AmazonSSMManagedInstanceCore` for Session Manager.
+- **API execution role** — ECR pull, logs on `/video-backend`,
+  `ssm:GetParameters` on the Cognito client-secret parameter.
+- **API task role** — `cognito-idp:{SignUp, ConfirmSignUp, InitiateAuth,
+  GetUser}` on the user pool; `dynamodb:{GetItem, PutItem, Query}` on both
+  tables and their `index/*`; `s3:PutObject` on `raw-bucket/videos/*` and
+  `thumbnails-bucket/thumbnails/*` (the presigned URLs' authority).
+- **Poller execution role** — ECR pull and logs only.
+- **Poller task role** — `sqs:{ReceiveMessage, DeleteMessage,
+  GetQueueAttributes}` on the completion queue; `dynamodb:UpdateItem` on
+  `video-status`.
+- **Express infrastructure role** — `AmazonECSInfrastructureRoleforExpressGatewayServices`,
+  used by ECS to manage the API's ALB, cert, SGs, and autoscaling.
 
 The API server itself never uploads to S3; the presigned URL delegates
-its permission to the client. Don't widen this policy — add a scoped
-statement instead.
+its permission to the client. Don't widen these policies — add a scoped
+statement to the one role that needs it.
 
 ## Network
 
-- The instance sits in the pipeline VPC. `terraform/network.tf` adds the
-  ingress rule that opens Redis 6379 to this stack's SG; the pipeline stack
-  is not edited for it. Do NOT expose Redis to the internet.
-- The instance SG opens nothing inbound by default — shell access is SSM
-  Session Manager. `api_ingress_cidrs` / `ssh_ingress_cidrs` are opt-in.
-- Public traffic in via ALB or nginx; uvicorn runs with `--proxy-headers
-  --forwarded-allow-ips '*'` so `X-Forwarded-Proto` drives `Secure` cookie
-  issuance. That trusts forwarded headers unconditionally, so only put a
-  proxy you control in front.
+- Both services run in the pipeline VPC's public subnets with public IPs
+  (there is no NAT). `terraform/network.tf` adds the ingress rule that opens
+  Redis 6379 to the API SG only; the pipeline stack is not edited for it.
+  Do NOT expose Redis to the internet.
+- The poller SG allows no inbound traffic. The API SG allows only the
+  container port from the VPC CIDR, which is how the Express Mode ALB reaches
+  the tasks (Express Mode can't add rules to an SG it didn't create). Public
+  traffic reaches the API only through the ALB. There is no shell access; use
+  logs or ECS Exec if you enable it.
+- uvicorn runs with `--proxy-headers --forwarded-allow-ips '*'` so the ALB's
+  `X-Forwarded-Proto` drives `Secure` cookie issuance. That trusts forwarded
+  headers unconditionally, which is fine only because nothing outside the VPC
+  can reach the container port.
 
 ## Editing conventions
 
@@ -173,10 +184,10 @@ statement instead.
 - Cookies use `HttpOnly=True`, `Secure` toggled by config. Don't
   weaken them for local convenience — set `COOKIE_SECURE=false` in the
   dev `.env` instead.
-- A new setting means three edits: `config.py`, `.env.example`, and the
-  heredoc in `scripts/generate-env.sh`.
+- A new setting means four edits: `config.py`, `.env.example`, the heredoc
+  in `scripts/generate-env.sh`, and the environment map in
+  `terraform/ecs.tf` for each process that reads it.
 - New Python dependency → `requirements.txt` → rebuild and push the image.
-  There is no venv on the instance.
 
 ## Local dev
 
@@ -200,18 +211,13 @@ docker compose up        # API on 127.0.0.1:8000
 
 Full playbook in `deployment-guide.md`. High-level, pipeline already applied:
 
-1. `cd terraform && terraform apply` — instance, IAM, SG, ECR, SSM param,
-   thumbnails bucket, log group.
-2. `scripts/push-image.sh` — buildx to ECR. Platform must match
-   `cpu_architecture` (default arm64 / `t4g.small`).
-3. `scripts/generate-env.sh --push-ssm`.
-4. `sudo systemctl restart video-backend` over Session Manager.
-5. `aws logs tail /video-backend --follow`.
+1. First time only: `cd terraform && terraform init -upgrade &&
+   terraform apply -target=aws_ecr_repository.backend`, so there is a repo to
+   push to before the services exist.
+2. `scripts/push-image.sh <tag>` — buildx `linux/amd64` to ECR.
+3. `cd terraform && terraform apply -var image_tag=<tag>` — cluster, both
+   services, IAM, SGs, thumbnails bucket, log group. Waits for the API to be
+   healthy.
+4. `aws logs tail /video-backend --follow`.
 
-Redeploy = steps 2 and 4. The instance is never rebuilt for a code or config
-change.
-
-**`docker-compose.yml`, `scripts/deploy.sh`, and `systemd/video-backend.service`
-are baked into user_data** via `base64encode(file(...))`, and the instance has
-`user_data_replace_on_change = true`. Editing any of those three replaces the
-instance on the next apply. Everything else ships in the image.
+Redeploy = steps 2 and 3 with a new tag.

@@ -80,3 +80,14 @@ resource "aws_cognito_user_pool_client" "backend" {
   id_token_validity      = 60
   refresh_token_validity = 30
 }
+
+# The backend's ECS task definitions inject the client secret from here
+# (container `secrets`), so it never appears as a plain environment value in
+# a task definition. The value already lives in this stack's state via the
+# client resource above.
+resource "aws_ssm_parameter" "cognito_client_secret" {
+  name        = "/${var.project_name}/cognito/client-secret"
+  description = "Cognito app client secret for the backend API"
+  type        = "SecureString"
+  value       = aws_cognito_user_pool_client.backend.client_secret
+}

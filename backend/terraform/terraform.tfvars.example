@@ -1,0 +1,48 @@
+# Copy to terraform.tfvars and fill in. Apply only after IAC/terraform.
+
+# Must match the pipeline stack, or the check block fails the plan.
+aws_region   = "ap-south-1"
+project_name = "video-transcoder"
+backend_name = "video-backend"
+
+# Where this stack reads the pipeline outputs from.
+# For a remote pipeline state, set pipeline_state_backend = "s3" and fill in
+# pipeline_state_s3_bucket / pipeline_state_s3_key instead.
+pipeline_state_backend    = "local"
+pipeline_state_local_path = "../../IAC/terraform/terraform.tfstate"
+
+# Cognito is provisioned by IAC/terraform/cognito.tf — nothing to set here.
+
+# REQUIRED. Globally unique across all of S3.
+thumbnails_bucket_name  = "my-org-thumbnails"
+thumbnails_cors_origins = ["https://app.example.com"]
+
+# Container image. Deploy = push a new tag, then change image_tag and apply.
+ecr_repository_name = "video-backend"
+image_tag           = "latest"
+
+# API service (ECS Express Mode). Express Mode creates the HTTPS ALB.
+api_cpu       = "512"
+api_memory    = "1024"
+api_min_tasks = 1
+api_max_tasks = 4
+
+# Poller service (plain Fargate, no load balancer).
+poller_cpu           = "256"
+poller_memory        = "512"
+poller_desired_count = 1
+
+# App settings passed to the API task as environment.
+# CORS and SameSite only apply to browsers. Native mobile clients ignore
+# both. A browser frontend on another domain than the API's *.on.aws URL is
+# cross-site: it needs its origin here and cookie_samesite = "none".
+cors_origins    = ["https://app.example.com"]
+cookie_secure   = true
+cookie_samesite = "lax"
+
+log_retention_days = 30
+
+tags = {
+  Environment = "dev"
+  Owner       = "video-platform"
+}

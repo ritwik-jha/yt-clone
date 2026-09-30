@@ -46,6 +46,17 @@ variable "processed_bucket_name" {
   type        = string
 }
 
+variable "cloudfront_price_class" {
+  description = "CloudFront price class for the playback distribution. PriceClass_200 includes India edge locations."
+  type        = string
+  default     = "PriceClass_200"
+
+  validation {
+    condition     = contains(["PriceClass_100", "PriceClass_200", "PriceClass_All"], var.cloudfront_price_class)
+    error_message = "cloudfront_price_class must be PriceClass_100, PriceClass_200, or PriceClass_All."
+  }
+}
+
 # ---------- SQS ----------
 variable "sqs_queue_name" {
   description = "Main SQS queue for S3 object-created events"

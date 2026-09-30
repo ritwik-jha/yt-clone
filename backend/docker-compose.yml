@@ -1,9 +1,6 @@
-# Two containers, one image. Deployed on the EC2 instance provisioned by
-# backend/terraform. Both read the same .env, which scripts/generate-env.sh
-# produces from the pipeline Terraform outputs.
-#
-# BACKEND_IMAGE is supplied by scripts/deploy.sh (ECR URI + tag). For local
-# use it falls back to a locally built `video-backend:local`.
+# Local parity only: the same two processes the ECS services run
+# (backend/terraform/ecs.tf), reading a .env from scripts/generate-env.sh.
+# BACKEND_IMAGE defaults to a locally built `video-backend:local`.
 
 services:
   api:
@@ -11,9 +8,7 @@ services:
     container_name: video-backend-api
     restart: unless-stopped
     env_file: .env
-    # Localhost-only by default so a plain `docker compose up` on a laptop
-    # does not expose the API. deploy.sh sets API_BIND=0.0.0.0 on the
-    # instance, where the security group is the access control.
+    # Localhost-only so a plain `docker compose up` does not expose the API.
     ports:
       - "${API_BIND:-127.0.0.1}:8000:8000"
     healthcheck:

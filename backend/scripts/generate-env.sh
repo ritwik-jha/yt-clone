@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# Generate backend/.env from Terraform state.
+# Generate backend/.env from Terraform state, for running the API and poller
+# locally against the deployed AWS resources. The ECS services do not use
+# this file — backend/terraform/ecs.tf builds their environment directly.
 #
 # Reads the outputs of the pipeline stack (IAC/terraform) and, when it has
 # been applied, the backend stack (backend/terraform), and writes every
@@ -17,9 +19,8 @@
 #   scripts/generate-env.sh
 #   scripts/generate-env.sh --pipeline-dir ../IAC/terraform --out .env
 #   scripts/generate-env.sh --state ../IAC/terraform/terraform.tfstate
-#   scripts/generate-env.sh --push-ssm
 #
-# Requires: jq, and either terraform or --state. --push-ssm requires awscli.
+# Requires: jq, and either terraform or --state.
 
 set -euo pipefail
 
@@ -33,7 +34,6 @@ PIPELINE_STATE=""
 BACKEND_STATE=""
 OUT_FILE="$BACKEND_ROOT/.env"
 EXAMPLE_FILE="$BACKEND_ROOT/.env.example"
-PUSH_SSM=0
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "  $*" >&2; }
@@ -45,7 +45,6 @@ while [[ $# -gt 0 ]]; do
     --state)          PIPELINE_STATE="$2"; shift 2 ;;
     --backend-state)  BACKEND_STATE="$2";  shift 2 ;;
     --out)            OUT_FILE="$2";       shift 2 ;;
-    --push-ssm)       PUSH_SSM=1;          shift ;;
     -h|--help)        sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)                die "unknown argument: $1" ;;
   esac
@@ -149,6 +148,7 @@ fi
 COGNITO_POOL="$(require COGNITO_USER_POOL_ID "$(pipeline_out cognito_user_pool_id)")"
 COGNITO_CLIENT="$(require COGNITO_CLIENT_ID "$(pipeline_out cognito_user_pool_client_id)")"
 COGNITO_SECRET="$(require COGNITO_CLIENT_SECRET "$(pipeline_out cognito_user_pool_client_secret)")"
+CLOUDFRONT="$(require CLOUDFRONT_DOMAIN "$(pipeline_out cloudfront_domain_name)")"
 
 # ------------------------------------------------------------------- emit
 
@@ -196,25 +196,11 @@ REDIS_HOST=${REDIS_HOST_V}
 REDIS_PORT=${REDIS_PORT_V}
 REDIS_TLS=$(carried REDIS_TLS)
 REDIS_PROGRESS_PREFIX=${REDIS_PREFIX:-$(carried REDIS_PROGRESS_PREFIX)}
+
+# --- CloudFront (playback domain for the processed bucket) ---
+CLOUDFRONT_DOMAIN=${CLOUDFRONT}
 EOF
 
 mkdir -p "$(dirname "$OUT_FILE")"
 install -m 600 "$TMP_FILE" "$OUT_FILE"
 echo "wrote $OUT_FILE" >&2
-
-# ------------------------------------------------------------------- SSM push
-
-if [[ "$PUSH_SSM" -eq 1 ]]; then
-  command -v aws >/dev/null || die "awscli is required for --push-ssm"
-  PARAM_NAME="$(backend_out env_ssm_parameter)"
-  [[ -n "$PARAM_NAME" ]] \
-    || die "backend stack output 'env_ssm_parameter' not found — apply backend/terraform first"
-  aws ssm put-parameter \
-    --name "$PARAM_NAME" \
-    --type SecureString \
-    --value "file://$OUT_FILE" \
-    --overwrite \
-    --region "$AWS_REGION_V" >/dev/null
-  echo "pushed $OUT_FILE to SSM parameter $PARAM_NAME" >&2
-  echo "run 'sudo systemctl restart video-backend' on the instance to pick it up" >&2
-fi

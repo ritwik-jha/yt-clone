@@ -3,14 +3,15 @@
 # Build the backend image and push it to the ECR repo created by
 # backend/terraform. Run from anywhere; paths resolve off this script.
 #
-# The build platform must match backend/terraform's cpu_architecture
-# (t4g.* instances are arm64). A mismatch produces an image the instance
-# cannot run, and `docker compose up` fails with "exec format error".
+# Both ECS services run x86_64 (the AWS provider has no architecture
+# setting for Express Mode yet), so the image is built for linux/amd64. An
+# arm64 image fails to start with "exec format error".
+#
+# Deploy by pushing a new tag, then `terraform apply -var image_tag=<tag>`.
 #
 # Usage:
 #   scripts/push-image.sh              # tag from terraform (default: latest)
-#   scripts/push-image.sh v3           # explicit tag
-#   PLATFORM=linux/amd64 scripts/push-image.sh
+#   scripts/push-image.sh "$(git rev-parse --short HEAD)"   # explicit tag
 
 set -euo pipefail
 
@@ -37,8 +38,7 @@ if [[ -z "$TAG" ]]; then
   TAG="${IMAGE_REF##*:}"
 fi
 
-# arm64 matches the t4g.small default in terraform.tfvars.example.
-PLATFORM="${PLATFORM:-linux/arm64}"
+PLATFORM="${PLATFORM:-linux/amd64}"
 REGISTRY="${ECR_URL%%/*}"
 
 echo "building $ECR_URL:$TAG for $PLATFORM" >&2

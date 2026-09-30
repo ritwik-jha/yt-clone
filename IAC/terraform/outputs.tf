@@ -6,6 +6,11 @@ output "vpc_id" {
   value = aws_vpc.this.id
 }
 
+output "vpc_cidr" {
+  description = "VPC IPv4 CIDR. The backend API SG admits its container port from here (the Express Mode ALB)."
+  value       = aws_vpc.this.cidr_block
+}
+
 output "public_subnet_ids" {
   value = aws_subnet.public[*].id
 }
@@ -119,4 +124,18 @@ output "cognito_user_pool_client_id" {
 output "cognito_user_pool_client_secret" {
   value     = aws_cognito_user_pool_client.backend.client_secret
   sensitive = true
+}
+
+output "cognito_client_secret_parameter_arn" {
+  description = "SSM SecureString the backend API task reads COGNITO_CLIENT_SECRET from."
+  value       = aws_ssm_parameter.cognito_client_secret.arn
+}
+
+output "cloudfront_domain_name" {
+  description = "Playback domain for the processed bucket. manifest_url = https://<this>/<manifest_key>."
+  value       = aws_cloudfront_distribution.processed.domain_name
+}
+
+output "cloudfront_distribution_id" {
+  value = aws_cloudfront_distribution.processed.id
 }

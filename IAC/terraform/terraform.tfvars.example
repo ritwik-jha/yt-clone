@@ -18,6 +18,9 @@ redis_lock_key_prefix     = "video:lock"
 redis_progress_key_prefix = "video:progress"
 redis_lock_ttl_seconds    = 1800
 
+# CloudFront edge coverage for DASH playback (PriceClass_100 | _200 | _All).
+cloudfront_price_class = "PriceClass_200"
+
 # Network sizing
 vpc_cidr               = "10.42.0.0/16"
 az_count               = 2

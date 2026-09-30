@@ -77,7 +77,7 @@ IAC/
 │   └── transcoder.py           # lock -> download -> ffmpeg -> upload -> completion SQS
 └── deployment-guide.md         # (this file)
 
-../backend/                     # FastAPI gateway + completion poller (EC2)
+../backend/                     # FastAPI gateway + completion poller (ECS)
 ```
 
 ---
@@ -126,16 +126,23 @@ All defaults live in `terraform/variables.tf`; override any of these in
 
 ### 1.2 What this Terraform does NOT provision
 
-- **The backend app and the EC2 instance it runs on.** Both live in a
-  second Terraform stack at `../backend/terraform/`, applied after this
-  one. It provisions the instance, its IAM role (scoped to the tables,
-  buckets, and queue below), its security group, an ECR repo, the
-  thumbnails bucket, and the SSM parameter carrying the backend `.env`.
-  It reads this stack's outputs via `terraform_remote_state` and does not
-  modify anything here — except for one ingress rule it adds to
-  `aws_security_group.redis` so the instance can reach the cache.
-  Walkthrough: `../backend/deployment-guide.md`.
-- **An ALB or TLS certificate** in front of the backend.
+- **The backend app and its ECS services.** They live in a second
+  Terraform stack at `../backend/terraform/`, applied after this one. It
+  provisions an ECS cluster, the API as an ECS Express Mode service (which
+  creates its own HTTPS ALB and certificate), the poller as a Fargate
+  service, separate IAM roles per service (scoped to the tables, buckets,
+  queue, and Cognito secret below), their security groups, an ECR repo,
+  and the thumbnails bucket. It reads this stack's outputs via
+  `terraform_remote_state` and does not modify anything here, except for
+  one ingress rule it adds to `aws_security_group.redis` so the API tasks
+  can reach the cache. Walkthrough: `../backend/deployment-guide.md`.
+- **Custom domains** for the API or the CloudFront distribution. Both use
+  AWS-issued hostnames.
+
+This stack **does** provision the CloudFront distribution (`cloudfront.tf`)
+that serves DASH output from the private processed bucket through Origin
+Access Control, and the SSM SecureString holding the Cognito client secret
+that the backend API task reads at start.
 
 The Cognito user pool + app client (`cognito.tf`) and the `users` DynamoDB
 table it mirrors (`dynamodb.tf`) **are** both provisioned here — the pool
@@ -145,7 +152,7 @@ how `../backend/app/routers/auth.py` signs up, confirms, and logs in.
 ### 1.3 Backend poller — contract
 
 Implemented by `../backend/app/workers/completion_poller.py`, run as the
-`poller` container on the backend instance. It drains the completion queue
+poller ECS service. It drains the completion queue
 and upserts DynamoDB:
 
 - **Queue URL / ARN**: `completion_queue_url` / `completion_queue_arn`
@@ -167,8 +174,10 @@ and upserts DynamoDB:
   ```
   UpdateItem  table=video-status
               key    = { video_id: <video_id> }
-              set    status, manifest_uri, error, updated_at = <timestamp>
+              set    status, manifest_key, manifest_url, error, updated_at = <timestamp>
   ```
+  `manifest_key` is the S3 key parsed from `manifest_uri`; `manifest_url`
+  is `https://<cloudfront_domain_name>/<manifest_key>`, which players load.
 - **Idempotency**: use `UpdateItem` (not `PutItem`) so redelivered
   messages just overwrite the same attributes.
 - **Progress endpoint**: for the client-facing `GET /videos/{id}/progress`
@@ -238,16 +247,17 @@ A separate stack, applied after this one. Full walkthrough:
 ```bash
 cd ../backend/terraform
 cp terraform.tfvars.example terraform.tfvars   # thumbnails_bucket_name
-terraform init && terraform apply              # EC2, IAM, SG, ECR, SSM, thumbnails bucket
+terraform init -upgrade
+terraform apply -target=aws_ecr_repository.backend   # repo first, so there is somewhere to push
 
 cd ..
-scripts/push-image.sh                          # build + push the backend image
-scripts/generate-env.sh --push-ssm             # this stack's outputs -> .env -> SSM
+scripts/push-image.sh <tag>                    # build + push the backend image (linux/amd64)
+terraform -chdir=terraform apply -var image_tag=<tag>   # cluster, API + poller services, IAM, SGs
 ```
 
 That stack reads the outputs from Step 2 through `terraform_remote_state`,
 so nothing is copied by hand. It also adds the one ingress rule that lets
-the instance reach `redis_endpoint` on 6379.
+the API tasks reach `redis_endpoint` on 6379.
 
 ### Step 5 — Smoke test
 
@@ -293,8 +303,8 @@ aws s3 ls "s3://$(terraform -chdir=../terraform output -raw processed_bucket)/$V
   next `RunTask`.
 - **Lambda**: edit `IAC/lambda/lambda_function.py` → `terraform apply`
   (source hash triggers redeploy).
-- **Backend**: edit `backend/` → re-sync to the EC2 instance and
-  `systemctl restart backend completion-poller`.
+- **Backend**: edit `backend/` → `scripts/push-image.sh <tag>` →
+  `terraform apply -var image_tag=<tag>` in `backend/terraform`.
 
 ---
 
@@ -326,7 +336,7 @@ S3 buckets have `force_destroy = true`. ECR is not force-deleted — run
   but if two consecutive stages take longer than TTL the lock could
   expire. Default 1800s covers most content up to ~30 min per stage.
 - **Redis reachability from the backend**: Redis lives in the pipeline
-  VPC, and the backend stack places its instance in the same VPC. If you
+  VPC, and the backend stack places its ECS tasks in the same VPC. If you
   move the backend elsewhere, VPC-peer or add an NLB/PrivateLink. Don't
   expose Redis to the internet.
 - **Duplicate dispatches are safe**: SQS at-least-once + Lambda partial-

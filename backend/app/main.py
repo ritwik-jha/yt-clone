@@ -3,8 +3,8 @@
 Run for local dev:
     uvicorn app.main:app --reload
 
-Production (systemd unit uses this):
-    uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+Production (ECS Express Mode service, see backend/terraform/ecs.tf):
+    uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers
 """
 
 from fastapi import FastAPI
@@ -14,6 +14,10 @@ from app.config import get_settings
 from app.routers import auth, upload, videos
 
 settings = get_settings()
+settings.require(
+    "cognito_user_pool_id", "cognito_client_id", "cognito_client_secret",
+    "s3_raw_videos_bucket", "s3_thumbnails_bucket", "redis_host",
+)
 
 app = FastAPI(title="Video Platform Backend", version="1.0.0")
 

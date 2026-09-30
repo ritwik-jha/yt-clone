@@ -1,16 +1,17 @@
-# Video Platform Backend (FastAPI, EC2)
+# Video Platform Backend (FastAPI, ECS)
 
-FastAPI service that fronts the video transcoding pipeline. Two containers on
-one EC2 instance, built from the same image and sharing one `.env`:
+FastAPI service that fronts the video transcoding pipeline. Two ECS Fargate
+services, built from the same image:
 
-1. **`api`** — HTTP API (`uvicorn app.main:app`)
-2. **`poller`** — drains the transcoder's SQS completion queue and writes
+1. **`api`** — HTTP API (`uvicorn app.main:app`), an ECS Express Mode
+   service behind an HTTPS ALB
+2. **`poller`** — plain ECS service; drains the transcoder's SQS completion queue and writes
    DynamoDB (`app.workers.completion_poller`)
 
 This directory sits at the repo root, alongside `IAC/` — the Terraform,
 dispatcher Lambda, and Fargate transcoder that make up the pipeline this
 service fronts. It owns its own Terraform stack (`backend/terraform/`) for
-the instance it runs on, and consumes the pipeline stack's outputs rather
+the ECS services it runs as, and consumes the pipeline stack's outputs rather
 than touching its resources. Deploy the pipeline first.
 
 ---
@@ -43,7 +44,7 @@ Cookies set by login: `access_token` (1h) and `refresh_token` (5d),
 backend/
 ├── app/
 │   ├── main.py                        # FastAPI app
-│   ├── config.py                      # pydantic-settings from .env
+│   ├── config.py                      # pydantic-settings: environment, then .env
 │   ├── clients.py                     # boto3 + redis singletons
 │   ├── crypto.py                      # Cognito HMAC secret_hash
 │   ├── deps.py                        # get_current_user dependency
@@ -54,15 +55,12 @@ backend/
 │   │   └── videos.py
 │   └── workers/
 │       └── completion_poller.py       # SQS -> DDB drainer
-├── terraform/                         # EC2 + IAM + SG + ECR + SSM + thumbnails bucket
+├── terraform/                         # ECS cluster + services, IAM, SGs, ECR, thumbnails bucket
 ├── scripts/
-│   ├── generate-env.sh                # terraform state -> .env (+ push to SSM)
-│   ├── push-image.sh                  # build + push the image to ECR
-│   └── deploy.sh                      # runs ON the instance: env -> pull -> up
-├── systemd/
-│   └── video-backend.service          # oneshot unit that runs deploy.sh
+│   ├── generate-env.sh                # terraform state -> .env (local dev)
+│   └── push-image.sh                  # build + push the image to ECR
 ├── Dockerfile                         # one image, both processes
-├── docker-compose.yml                 # api + poller services
+├── docker-compose.yml                 # api + poller, local parity
 ├── requirements.txt
 ├── .env.example
 ├── deployment-guide.md                # full deploy walkthrough
@@ -73,11 +71,14 @@ backend/
 
 ## Configuration
 
-`.env.example` documents every variable. In practice you do not fill it in by
-hand — `scripts/generate-env.sh` derives the infrastructure values from the
-Terraform state of both stacks:
+In ECS, each service's environment is built by `terraform/ecs.tf` from both
+stacks' state, and `COGNITO_CLIENT_SECRET` is injected from the pipeline's
+SSM SecureString. No `.env` exists in production.
 
-| .env variable | Source |
+For local runs, `.env.example` documents every variable and
+`scripts/generate-env.sh` derives the infrastructure values the same way:
+
+| Variable | Source |
 |---|---|
 | `AWS_REGION` | pipeline output `aws_region` |
 | `DDB_VIDEOS_TABLE` | pipeline output `dynamodb_table` |
@@ -87,6 +88,7 @@ Terraform state of both stacks:
 | `REDIS_HOST` / `REDIS_PORT` | pipeline outputs `redis_host` / `redis_port` |
 | `REDIS_PROGRESS_PREFIX` | pipeline output `redis_progress_key_prefix` |
 | `S3_THUMBNAILS_BUCKET` | backend output `thumbnails_bucket` |
+| `CLOUDFRONT_DOMAIN` | pipeline output `cloudfront_domain_name` |
 | `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_CLIENT_SECRET` | pipeline outputs `cognito_user_pool_id` / `cognito_user_pool_client_id` / `cognito_user_pool_client_secret` |
 | everything else (CORS, cookies, TTLs) | carried from the existing `.env`, then the environment, then `.env.example` |
 
@@ -94,7 +96,7 @@ Cognito is provisioned by `IAC/terraform/cognito.tf` — a confidential app
 client (secret + `USER_PASSWORD_AUTH`) against a pool that uses email as the
 username, matching how `app/routers/auth.py` signs up and logs in.
 
-`.env` is gitignored and written mode 600. It holds
+The local `.env` is gitignored and written mode 600. It holds
 `COGNITO_CLIENT_SECRET` — do not commit it, and do not bake it into the
 image (`.dockerignore` excludes it).
 
@@ -102,38 +104,40 @@ image (`.dockerignore` excludes it).
 
 ## Deployment
 
-Two Docker containers on one EC2 instance, both from the same image:
+Two ECS services in the `video-backend` cluster, both from the same image:
 
-| Container | Command |
-|---|---|
-| `video-backend-api` | `uvicorn app.main:app --workers 2 --proxy-headers` |
-| `video-backend-poller` | `python -m app.workers.completion_poller` |
+| Service | Kind | Command |
+|---|---|---|
+| `video-backend-api` | ECS Express Mode (HTTPS ALB, autoscaling) | `uvicorn app.main:app --workers 2 --proxy-headers` |
+| `video-backend-poller` | ECS service, Fargate, no load balancer | `python -m app.workers.completion_poller` |
 
-`backend/terraform/` provisions the instance, its IAM role, its security
-group, the ECR repo, the thumbnails bucket, the CloudWatch log group, and an
-SSM SecureString parameter that carries the `.env` to the box. It reads the
-pipeline stack's outputs via `terraform_remote_state` and never modifies
-pipeline resources.
+`backend/terraform/` provisions the cluster, both services, a separate
+execution and task role for each, the Express Mode infrastructure role, the
+SGs, the ECR repo, the thumbnails bucket, and the CloudWatch log group. It
+reads the pipeline stack's outputs via `terraform_remote_state` and never
+modifies pipeline resources, apart from adding one ingress rule to the Redis
+SG for the API.
 
 The short version, assuming `IAC/terraform` is already applied:
 
 ```bash
 cd backend/terraform
 cp terraform.tfvars.example terraform.tfvars   # set thumbnails_bucket_name
-terraform init && terraform apply
+terraform init -upgrade
+terraform apply -target=aws_ecr_repository.backend   # first deploy only
 
 cd ..
-scripts/push-image.sh
-scripts/generate-env.sh --push-ssm
-aws ssm start-session --target "$(terraform -chdir=terraform output -raw instance_id)"
-#   sudo systemctl restart video-backend
+TAG="$(git rev-parse --short HEAD)"
+scripts/push-image.sh "$TAG"
+terraform -chdir=terraform apply -var image_tag="$TAG"
+terraform -chdir=terraform output -raw api_url
 ```
 
-Full walkthrough, including exposing the API, routine operations, and
-teardown ordering: **`deployment-guide.md`**.
+Full walkthrough, including routine operations and teardown ordering:
+**`deployment-guide.md`**.
 
-Container logs go to the CloudWatch group `/video-backend`
-(`aws logs tail /video-backend --follow`), not to journald.
+Logs from both services go to the CloudWatch group `/video-backend`
+(`aws logs tail /video-backend --follow`).
 
 ---
 
@@ -151,7 +155,9 @@ Container logs go to the CloudWatch group `/video-backend`
   `status=PROCESSING`, `video_key`, `thumbnail_key`, `uploader_sub`,
   `created_at`, `updated_at`
 - attrs written by completion poller: `status` (COMPLETED/FAILED),
-  `manifest_uri`, `error`, `updated_at`
+  `manifest_key` (S3 key in the processed bucket), `manifest_url`
+  (`https://<cloudfront>/<manifest_key>`, what players load), `error`,
+  `updated_at`
 
 ### Redis
 - `video:progress:<video_id>` — written by transcoder, read by

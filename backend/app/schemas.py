@@ -73,7 +73,8 @@ class VideoResponse(BaseModel):
     status: VideoStatus
     video_key: str
     thumbnail_key: Optional[str] = None
-    manifest_uri: Optional[str] = None
+    manifest_key: Optional[str] = None
+    manifest_url: Optional[str] = None
     uploader_sub: str
     created_at: str
     updated_at: Optional[str] = None

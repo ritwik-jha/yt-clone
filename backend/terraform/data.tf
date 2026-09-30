@@ -11,10 +11,3 @@ data "terraform_remote_state" "pipeline" {
     path = var.pipeline_state_local_path
   }
 }
-
-# Canonical publishes the current Ubuntu AMI id as a public SSM parameter, so
-# the instance always launches on a patched image without an ami filter block
-# that drifts.
-data "aws_ssm_parameter" "ubuntu_ami" {
-  name = "/aws/service/canonical/ubuntu/server/${var.ubuntu_version}/stable/current/${var.cpu_architecture}/hvm/ebs-gp3/ami-id"
-}

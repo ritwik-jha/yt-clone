@@ -11,7 +11,7 @@ variable "project_name" {
 }
 
 variable "backend_name" {
-  description = "Name prefix for every resource in this stack."
+  description = "Name prefix for every resource in this stack (also the ECS cluster name)."
   type        = string
   default     = "video-backend"
 }
@@ -47,9 +47,6 @@ variable "pipeline_state_s3_key" {
   default     = "video-transcoder/terraform.tfstate"
 }
 
-# Cognito is provisioned by the pipeline stack (IAC/terraform/cognito.tf).
-# This stack reads its pool ARN from local.pipeline — no variable needed.
-
 # --- Thumbnails bucket ----------------------------------------------------
 
 variable "thumbnails_bucket_name" {
@@ -72,82 +69,128 @@ variable "ecr_repository_name" {
 }
 
 variable "image_tag" {
-  description = "Tag the instance pulls on deploy."
+  description = "Tag both services run. Push a new tag and change this to deploy."
   type        = string
   default     = "latest"
 }
 
-# --- Instance -------------------------------------------------------------
-
-variable "instance_type" {
-  description = "EC2 instance type. Must match cpu_architecture (t4g.* = arm64, t3.* = x86_64)."
-  type        = string
-  default     = "t4g.small"
-}
-
-variable "cpu_architecture" {
-  description = "Architecture for the AMI and the backend image build."
-  type        = string
-  default     = "arm64"
-
-  validation {
-    condition     = contains(["arm64", "amd64"], var.cpu_architecture)
-    error_message = "cpu_architecture must be 'arm64' or 'amd64'."
-  }
-}
-
-variable "ubuntu_version" {
-  description = "Ubuntu LTS release for the instance AMI."
-  type        = string
-  default     = "24.04"
-}
-
-variable "root_volume_size_gb" {
-  description = "Root EBS volume size. Images plus logs fit comfortably in 30 GB."
-  type        = number
-  default     = 30
-}
-
-variable "key_pair_name" {
-  description = "Optional EC2 key pair for SSH. Leave null and use SSM Session Manager."
-  type        = string
-  default     = null
-}
-
-variable "associate_eip" {
-  description = "Attach a stable Elastic IP so DNS does not change on instance replacement."
-  type        = bool
-  default     = true
-}
-
-# --- Ingress --------------------------------------------------------------
-
-variable "api_ingress_cidrs" {
-  description = <<-EOT
-    CIDRs allowed to reach the API port directly. Empty (the default) means
-    no inbound rule at all — reach the instance through SSM port forwarding,
-    or put an ALB in front and open the port to the ALB's SG instead.
-  EOT
-  type        = list(string)
-  default     = []
-}
+# --- API service (ECS Express Mode) --------------------------------------
 
 variable "api_port" {
-  description = "Host port the API container publishes on."
+  description = "Container port uvicorn listens on; Express Mode points the ALB target group here."
   type        = number
   default     = 8000
 }
 
-variable "ssh_ingress_cidrs" {
-  description = "CIDRs allowed to SSH. Prefer SSM Session Manager and leave this empty."
+variable "api_cpu" {
+  description = "API task CPU units (power of 2, 256-4096)."
+  type        = string
+  default     = "512"
+}
+
+variable "api_memory" {
+  description = "API task memory in MiB (512-8192, must pair with api_cpu)."
+  type        = string
+  default     = "1024"
+}
+
+variable "api_min_tasks" {
+  description = "Autoscaling floor for the API service."
+  type        = number
+  default     = 1
+}
+
+variable "api_max_tasks" {
+  description = "Autoscaling ceiling for the API service."
+  type        = number
+  default     = 4
+}
+
+variable "api_cpu_target_percent" {
+  description = "Average CPU the API autoscaler tracks."
+  type        = number
+  default     = 60
+}
+
+# --- Poller service -------------------------------------------------------
+
+variable "poller_cpu" {
+  description = "Poller task CPU units."
+  type        = string
+  default     = "256"
+}
+
+variable "poller_memory" {
+  description = "Poller task memory in MiB."
+  type        = string
+  default     = "512"
+}
+
+variable "poller_desired_count" {
+  description = "Poller replicas. One is enough; SQS redelivers on failure."
+  type        = number
+  default     = 1
+}
+
+# --- Application settings (become task environment) ----------------------
+
+variable "cors_origins" {
+  description = "Browser origins allowed to call the API with credentials. Empty allows any origin."
   type        = list(string)
   default     = []
+}
+
+variable "cookie_secure" {
+  description = "Mark auth cookies Secure. Keep true: the Express Mode endpoint is HTTPS."
+  type        = bool
+  default     = true
+}
+
+variable "cookie_samesite" {
+  description = "SameSite attribute for auth cookies (lax, strict, none)."
+  type        = string
+  default     = "lax"
+
+  validation {
+    condition     = contains(["lax", "strict", "none"], var.cookie_samesite)
+    error_message = "cookie_samesite must be lax, strict, or none."
+  }
+}
+
+variable "access_cookie_max_age" {
+  description = "access_token cookie lifetime in seconds."
+  type        = number
+  default     = 3600
+}
+
+variable "refresh_cookie_max_age" {
+  description = "refresh_token cookie lifetime in seconds."
+  type        = number
+  default     = 432000
+}
+
+variable "presigned_url_ttl_seconds" {
+  description = "Lifetime of presigned upload URLs."
+  type        = number
+  default     = 3600
+}
+
+variable "completion_poll_wait_seconds" {
+  description = "SQS long-poll wait for the poller."
+  type        = number
+  default     = 10
+}
+
+variable "completion_max_messages" {
+  description = "Max messages per poller receive."
+  type        = number
+  default     = 10
 }
 
 # --- Logging --------------------------------------------------------------
 
 variable "log_retention_days" {
-  description = "CloudWatch retention for the api + poller container log streams."
+  description = "CloudWatch retention for the api + poller log streams."
   type        = number
   default     = 30
 }
