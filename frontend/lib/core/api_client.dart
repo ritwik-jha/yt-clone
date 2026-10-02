@@ -19,12 +19,19 @@ class ApiClient {
   /// Presigned S3 PUTs. Never carries an Authorization header.
   final Dio s3;
 
+  /// Points the API clients at a different backend (dev builds).
+  void setBaseUrl(String url) {
+    api.options.baseUrl = url;
+    bare.options.baseUrl = url;
+  }
+
   factory ApiClient({
     required TokenStore tokens,
     required void Function() onSessionExpired,
     String? baseUrl,
   }) {
-    final url = baseUrl ?? AppConfig.apiBaseUrl;
+    final url =
+        baseUrl ?? AppConfig.apiBaseUrl; // may be set later via setBaseUrl
     BaseOptions apiOptions() => BaseOptions(
       baseUrl: url,
       connectTimeout: const Duration(seconds: 10),

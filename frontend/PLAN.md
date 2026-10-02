@@ -10,7 +10,8 @@ Where those documents disagree with the backend as built, this plan follows
 the backend code (`backend/app/`). §3 lists every difference, so the spec's
 snippets can't be copied as they are.
 
-Status: M0 scaffold and M1–M3 are implemented and unit/widget tested (see
+Status: M0 scaffold, M1–M3, and most of M4 (resumable uploads, icon/splash,
+skeletons, semantics) are implemented and unit/widget tested (see
 `README.md`); nothing has run on a device yet. The spikes in M0 (§13) still
 need to confirm the riskier assumptions on real hardware.
 

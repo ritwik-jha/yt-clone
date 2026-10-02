@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ytp_app/core/api_exception.dart';
+import 'package:ytp_app/core/server_settings.dart';
 import 'package:ytp_app/core/theme.dart';
 import 'package:ytp_app/core/token_store.dart';
 import 'package:ytp_app/cubits/session/session_cubit.dart';
@@ -18,13 +19,20 @@ Future<Widget> _app(
   Widget Function(BuildContext) home,
 ) async {
   SharedPreferences.setMockInitialValues({});
-  final session = SessionCubit(
-    auth: auth,
-    tokens: TokenStore(MemoryKv()),
-    prefs: await SharedPreferences.getInstance(),
+  final prefs = await SharedPreferences.getInstance();
+  final tokens = TokenStore(MemoryKv());
+  final session = SessionCubit(auth: auth, tokens: tokens, prefs: prefs);
+  final settings = ServerSettings(
+    prefs: prefs,
+    tokens: tokens,
+    compileTimeUrl: 'http://localhost:8000',
+    allowOverride: true,
   );
-  return RepositoryProvider<AuthService>.value(
-    value: auth,
+  return MultiRepositoryProvider(
+    providers: [
+      RepositoryProvider<AuthService>.value(value: auth),
+      RepositoryProvider<ServerSettings>.value(value: settings),
+    ],
     child: BlocProvider.value(
       value: session,
       child: MaterialApp(

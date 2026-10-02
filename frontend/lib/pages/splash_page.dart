@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../core/theme.dart';
+import '../widgets/brand_mark.dart';
 import '../cubits/session/session_cubit.dart';
 import '../cubits/session/session_state.dart';
 
@@ -37,19 +38,7 @@ class SplashPage extends StatelessWidget {
             : Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    width: 64,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: YtColors.red,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 34,
-                    ),
-                  ),
+                  const BrandMark(size: 72),
                   const SizedBox(height: 24),
                   const SizedBox(
                     width: 22,

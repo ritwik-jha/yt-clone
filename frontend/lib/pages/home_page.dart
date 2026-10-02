@@ -1,13 +1,23 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../core/server_settings.dart';
 import '../core/theme.dart';
+import '../widgets/brand_mark.dart';
+import '../core/token_store.dart';
+import '../cubits/pending_uploads/pending_uploads_cubit.dart';
 import '../cubits/feed/feed_cubit.dart';
 import '../cubits/feed/feed_state.dart';
 import '../cubits/session/session_cubit.dart';
 import '../cubits/session/session_state.dart';
 import '../models/video.dart';
+import '../services/upload_job_store.dart';
+import '../services/upload_video_service.dart';
 import '../services/video_service.dart';
+import '../widgets/pending_uploads_banner.dart';
+import '../widgets/server_url_dialog.dart';
+import '../widgets/video_skeleton.dart';
 import '../widgets/error_view.dart';
 import '../widgets/video_card.dart';
 import 'my_videos_page.dart';
@@ -18,8 +28,20 @@ class HomePage extends StatelessWidget {
   const HomePage({super.key});
 
   @override
-  Widget build(BuildContext context) => BlocProvider(
-    create: (ctx) => FeedCubit(ctx.read<VideoService>())..load(),
+  Widget build(BuildContext context) => MultiBlocProvider(
+    providers: [
+      BlocProvider(
+        create: (ctx) => FeedCubit(ctx.read<VideoService>())..load(),
+      ),
+      // Saves uploads that finished but were never saved, and surfaces any
+      // other unfinished ones as a banner.
+      BlocProvider(
+        create: (ctx) => PendingUploadsCubit(
+          ctx.read<UploadJobStore>(),
+          ctx.read<UploadVideoService>(),
+        )..load(),
+      ),
+    ],
     child: const _HomeView(),
   );
 }
@@ -84,19 +106,7 @@ class _HomeViewState extends State<_HomeView> {
         titleSpacing: 12,
         title: Row(
           children: [
-            Container(
-              width: 32,
-              height: 22,
-              decoration: BoxDecoration(
-                color: YtColors.red,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: const Icon(
-                Icons.play_arrow_rounded,
-                size: 18,
-                color: Colors.white,
-              ),
-            ),
+            const BrandMark(size: 28),
             const SizedBox(width: 6),
             const Text(
               'Video Stream',
@@ -118,6 +128,10 @@ class _HomeViewState extends State<_HomeView> {
                 Navigator.of(context).push(MyVideosPage.route());
               } else if (v == 'logout') {
                 context.read<SessionCubit>().logout();
+              } else if (v == 'server') {
+                showServerUrlDialog(context, context.read<ServerSettings>());
+              } else if (v == 'expire') {
+                _expireAccessToken(context);
               }
             },
             itemBuilder: (_) => [
@@ -145,6 +159,24 @@ class _HomeViewState extends State<_HomeView> {
                   title: Text('Log out'),
                 ),
               ),
+              if (context.read<ServerSettings>().canChange)
+                const PopupMenuItem(
+                  value: 'server',
+                  child: ListTile(
+                    dense: true,
+                    leading: Icon(Icons.dns_outlined),
+                    title: Text('Backend server'),
+                  ),
+                ),
+              if (kDebugMode)
+                const PopupMenuItem(
+                  value: 'expire',
+                  child: ListTile(
+                    dense: true,
+                    leading: Icon(Icons.timer_off_outlined),
+                    title: Text('Expire access token'),
+                  ),
+                ),
             ],
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -173,7 +205,7 @@ class _HomeViewState extends State<_HomeView> {
         builder: (context, state) {
           if (state.status == ListStatus.initial ||
               state.status == ListStatus.loading) {
-            return const Center(child: CircularProgressIndicator());
+            return const VideoListSkeleton();
           }
           if (state.status == ListStatus.failure) {
             return ErrorView.fromException(
@@ -231,9 +263,12 @@ class _HomeViewState extends State<_HomeView> {
               controller: _scroll,
               physics: const AlwaysScrollableScrollPhysics(),
               itemCount:
+                  1 +
                   state.items.length +
                   (state.status == ListStatus.loadingMore ? 1 : 0),
               itemBuilder: (context, i) {
+                if (i == 0) return const PendingUploadsBanner();
+                i -= 1;
                 if (i >= state.items.length) {
                   return const Padding(
                     padding: EdgeInsets.all(24),
@@ -251,4 +286,19 @@ class _HomeViewState extends State<_HomeView> {
       ),
     );
   }
+}
+
+/// Debug only: corrupts the stored access token so the next request gets a
+/// 401 and exercises the refresh path (PLAN §12).
+Future<void> _expireAccessToken(BuildContext context) async {
+  final feed = context.read<FeedCubit>();
+  final messenger = ScaffoldMessenger.of(context);
+  await context.read<TokenStore>().save(
+    accessTokenKey,
+    'expired.invalid.token',
+  );
+  messenger.showSnackBar(
+    const SnackBar(content: Text('Access token expired. Refreshing the feed…')),
+  );
+  await feed.refresh();
 }

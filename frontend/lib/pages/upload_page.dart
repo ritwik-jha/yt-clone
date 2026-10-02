@@ -16,6 +16,7 @@ import '../core/validators.dart';
 import '../cubits/upload_video/upload_video_cubit.dart';
 import '../cubits/upload_video/upload_video_state.dart';
 import '../models/video.dart';
+import '../services/upload_job_store.dart';
 import '../services/upload_video_service.dart';
 import 'my_videos_page.dart';
 
@@ -24,7 +25,10 @@ class UploadPage extends StatelessWidget {
 
   static Route<void> route() => MaterialPageRoute(
     builder: (ctx) => BlocProvider(
-      create: (_) => UploadVideoCubit(ctx.read<UploadVideoService>()),
+      create: (_) => UploadVideoCubit(
+        ctx.read<UploadVideoService>(),
+        store: ctx.read<UploadJobStore>(),
+      ),
       child: const UploadPage(),
     ),
   );

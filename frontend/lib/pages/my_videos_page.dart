@@ -11,6 +11,7 @@ import '../widgets/edit_video_sheet.dart';
 import '../widgets/error_view.dart';
 import '../widgets/owner_menu.dart';
 import '../widgets/video_card.dart';
+import '../widgets/video_skeleton.dart';
 import 'upload_page.dart';
 import 'video_player_page.dart';
 
@@ -140,7 +141,7 @@ class _MyVideosViewState extends State<_MyVideosView> {
       builder: (context, state) {
         if (state.status == ListStatus.initial ||
             state.status == ListStatus.loading) {
-          return const Center(child: CircularProgressIndicator());
+          return const VideoListSkeleton();
         }
         if (state.status == ListStatus.failure) {
           return ErrorView.fromException(

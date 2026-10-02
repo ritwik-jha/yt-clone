@@ -3,7 +3,8 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/api_client.dart';
-import 'core/config.dart';
+import 'core/crash_reporter.dart';
+import 'core/server_settings.dart';
 import 'core/theme.dart';
 import 'core/token_store.dart';
 import 'cubits/session/session_cubit.dart';
@@ -11,8 +12,10 @@ import 'cubits/session/session_state.dart';
 import 'pages/auth/login_page.dart';
 import 'pages/auth/sign_up_page.dart';
 import 'pages/home_page.dart';
+import 'pages/server_setup_page.dart';
 import 'pages/splash_page.dart';
 import 'services/auth_service.dart';
+import 'services/upload_job_store.dart';
 import 'services/upload_video_service.dart';
 import 'services/video_service.dart';
 
@@ -20,58 +23,74 @@ final navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  if (AppConfig.apiBaseUrl.isEmpty) {
+  installCrashReporting();
+  final prefs = await SharedPreferences.getInstance();
+  final tokens = TokenStore(const FlutterSecureKv());
+  final settings = ServerSettings(prefs: prefs, tokens: tokens);
+  // Release builds have nowhere to ask for a URL, so fail fast.
+  if (settings.url == null && !settings.canChange) {
     throw StateError(
-      'API_BASE_URL is not set. Run with --dart-define-from-file=env/dev.json',
+      'API_BASE_URL is not set. Build with --dart-define-from-file=env/prod.json',
     );
   }
-  final prefs = await SharedPreferences.getInstance();
-  runApp(YtpApp(prefs: prefs));
+  runApp(YtpApp(prefs: prefs, tokens: tokens, settings: settings));
 }
 
 class YtpApp extends StatefulWidget {
-  const YtpApp({super.key, required this.prefs, this.tokens, this.baseUrl});
+  const YtpApp({
+    super.key,
+    required this.prefs,
+    required this.tokens,
+    required this.settings,
+  });
 
   final SharedPreferences prefs;
-  final TokenStore? tokens;
-  final String? baseUrl;
+  final TokenStore tokens;
+  final ServerSettings settings;
 
   @override
   State<YtpApp> createState() => _YtpAppState();
 }
 
 class _YtpAppState extends State<YtpApp> {
-  late final TokenStore _tokens =
-      widget.tokens ?? TokenStore(const FlutterSecureKv());
   late final ApiClient _client = ApiClient(
-    tokens: _tokens,
-    baseUrl: widget.baseUrl,
+    tokens: widget.tokens,
+    baseUrl: widget.settings.url ?? '',
     onSessionExpired: () => _session.expired(),
   );
   late final AuthService _auth = AuthService(
     api: _client.api,
     bare: _client.bare,
-    tokens: _tokens,
+    tokens: widget.tokens,
   );
   late final VideoService _videos = VideoService(_client.api);
   late final UploadVideoService _uploads = UploadVideoService(
     api: _client.api,
     s3: _client.s3,
   );
+  final UploadJobStore _jobs = UploadJobStore();
   late final SessionCubit _session = SessionCubit(
     auth: _auth,
-    tokens: _tokens,
+    tokens: widget.tokens,
     prefs: widget.prefs,
   );
 
   @override
   void initState() {
     super.initState();
-    _session.restore();
+    widget.settings.attach(_client);
+    widget.settings.urlNotifier.addListener(_onServerChanged);
+    if (widget.settings.url != null) _session.restore();
+  }
+
+  // A new server means a new identity pool: start over from the session check.
+  void _onServerChanged() {
+    if (widget.settings.url != null) _session.restore();
   }
 
   @override
   void dispose() {
+    widget.settings.urlNotifier.removeListener(_onServerChanged);
     _session.close();
     super.dispose();
   }
@@ -79,9 +98,12 @@ class _YtpAppState extends State<YtpApp> {
   @override
   Widget build(BuildContext context) => MultiRepositoryProvider(
     providers: [
+      RepositoryProvider.value(value: widget.settings),
+      RepositoryProvider.value(value: widget.tokens),
       RepositoryProvider.value(value: _auth),
       RepositoryProvider.value(value: _videos),
       RepositoryProvider.value(value: _uploads),
+      RepositoryProvider.value(value: _jobs),
     ],
     child: BlocProvider.value(
       value: _session,
@@ -92,7 +114,12 @@ class _YtpAppState extends State<YtpApp> {
         darkTheme: buildDarkTheme(),
         themeMode: ThemeMode.dark,
         navigatorKey: navigatorKey,
-        home: const _Root(),
+        home: ListenableBuilder(
+          listenable: widget.settings.urlNotifier,
+          builder: (context, _) => widget.settings.url == null
+              ? ServerSetupPage(settings: widget.settings)
+              : const _Root(),
+        ),
       ),
     ),
   );

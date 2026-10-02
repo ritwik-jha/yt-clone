@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+import '../core/server_settings.dart';
 import '../core/theme.dart';
+import 'brand_mark.dart';
+import 'server_url_dialog.dart';
 
 /// Shared layout for the auth screens: logo mark, title, form.
 class AuthScaffold extends StatelessWidget {
@@ -19,37 +24,52 @@ class AuthScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: showBack ? AppBar() : null,
+    appBar: showBack
+        ? AppBar(
+            actions: [
+              ServerUrlButton(settings: context.read<ServerSettings>()),
+            ],
+          )
+        : null,
     body: SafeArea(
-      child: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const _LogoMark(),
-                const SizedBox(height: 28),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 26,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    subtitle!,
-                    style: const TextStyle(color: YtColors.textSecondary),
-                  ),
-                ],
-                const SizedBox(height: 24),
-                ...children,
-              ],
+      child: Stack(
+        children: [
+          Positioned.fill(child: _form()),
+          if (!showBack)
+            Positioned(
+              top: 0,
+              right: 4,
+              child: ServerUrlButton(settings: context.read<ServerSettings>()),
             ),
-          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _form() => Center(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const _LogoMark(),
+            const SizedBox(height: 28),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w700),
+            ),
+            if (subtitle != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                subtitle!,
+                style: const TextStyle(color: YtColors.textSecondary),
+              ),
+            ],
+            const SizedBox(height: 24),
+            ...children,
+          ],
         ),
       ),
     ),
@@ -63,19 +83,7 @@ class _LogoMark extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     mainAxisAlignment: MainAxisAlignment.start,
     children: [
-      Container(
-        width: 40,
-        height: 28,
-        decoration: BoxDecoration(
-          color: YtColors.red,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: const Icon(
-          Icons.play_arrow_rounded,
-          color: Colors.white,
-          size: 22,
-        ),
-      ),
+      const BrandMark(size: 36),
       const SizedBox(width: 8),
       const Text(
         'Video Stream',

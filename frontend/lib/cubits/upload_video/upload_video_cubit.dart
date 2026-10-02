@@ -5,15 +5,19 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../core/api_exception.dart';
 import '../../models/saved_video.dart';
+import '../../models/upload_job.dart';
 import '../../models/video.dart';
+import '../../services/upload_job_store.dart';
 import '../../services/upload_video_service.dart';
 import 'upload_video_state.dart';
 
 /// Uploads thumbnail -> video -> save, resuming from the stage that failed
-/// on retry (plan §7).
+/// on retry (plan §7). With a [UploadJobStore] the job is persisted after
+/// every stage, so a killed app can resume it on the next launch (§7.5).
 class UploadVideoCubit extends Cubit<UploadVideoState> {
   UploadVideoCubit(
     this._service, {
+    this._store,
     this.retryDelays = const [
       Duration(seconds: 1),
       Duration(seconds: 3),
@@ -24,14 +28,18 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
        super(const UploadVideoInitial());
 
   final UploadVideoService _service;
+  final UploadJobStore? _store;
   final List<Duration> retryDelays;
   final DateTime Function() _now;
 
   static const _urlLifetime = Duration(minutes: 55);
 
-  // Job state kept across retries.
-  _Job? _job;
+  UploadJob? _job;
   CancelToken? _cancel;
+
+  // The presigned video URL is a credential, so it lives in memory only.
+  String? _videoUrl;
+  DateTime? _videoUrlIssuedAt;
 
   Future<void> uploadVideo({
     required String title,
@@ -40,13 +48,29 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
     required File video,
     required File thumbnail,
   }) async {
-    _job = _Job(
-      title: title,
-      description: description,
-      visibility: visibility,
-      video: video,
-      thumbnail: thumbnail,
-    );
+    final store = _store;
+    _job = store != null
+        ? await store.create(
+            title: title,
+            description: description,
+            visibility: visibility,
+            video: video,
+            thumbnail: thumbnail,
+          )
+        : UploadJob(
+            localId: 'memory',
+            title: title,
+            description: description,
+            visibility: visibility,
+            videoPath: video.path,
+            thumbnailPath: thumbnail.path,
+          );
+    await _run();
+  }
+
+  /// Continues a job loaded from disk.
+  Future<void> resume(UploadJob job) async {
+    _job = job;
     await _run();
   }
 
@@ -55,6 +79,7 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
     await _run();
   }
 
+  /// Stops the transfer and discards the job: a user cancel saves nothing.
   void cancel() {
     _cancel?.cancel('cancelled');
   }
@@ -64,11 +89,31 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
     emit(const UploadVideoInitial());
   }
 
+  Future<void> _persist() async => _store?.save(_job!);
+
+  Future<void> _finish() async {
+    final job = _job;
+    _job = null;
+    if (job != null) await _store?.delete(job);
+  }
+
   Future<void> _run() async {
     final job = _job!;
     _cancel = CancelToken();
     var stage = UploadStage.thumbnail;
     try {
+      if (!await job.video.exists() || !await job.thumbnail.exists()) {
+        await _finish();
+        emit(
+          const UploadVideoError(
+            'The selected files are no longer available. Please upload again.',
+            UploadStage.thumbnail,
+            retryable: false,
+          ),
+        );
+        return;
+      }
+
       if (!job.thumbnailUploaded) {
         stage = UploadStage.thumbnail;
         emit(const UploadVideoInProgress(UploadStage.thumbnail));
@@ -82,11 +127,13 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
         job
           ..thumbnailKey = target.key
           ..thumbnailUploaded = true;
+        await _persist();
       }
 
       if (!job.videoUploaded) {
         stage = UploadStage.video;
         await _uploadVideo(job);
+        await _persist();
       }
 
       stage = UploadStage.saving;
@@ -99,12 +146,12 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
           videoKey: job.videoKey!,
           thumbnailKey: job.thumbnailKey!,
         );
-        _job = null;
+        await _finish();
         emit(UploadVideoSuccess(saved));
       } on ApiException catch (e) {
         if (e.code == 'already_saved') {
           // The save already went through; My Videos will show it.
-          _job = null;
+          await _finish();
           emit(UploadVideoSuccess(_alreadySaved(job)));
         } else {
           rethrow;
@@ -112,7 +159,7 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
       }
     } on DioException catch (e) {
       if (CancelToken.isCancel(e)) {
-        _job = null;
+        await _finish();
         emit(const UploadVideoInitial());
       } else {
         emit(UploadVideoError(ApiException.fromDio(e).message, stage));
@@ -127,28 +174,29 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
     }
   }
 
-  Future<void> _uploadVideo(_Job job) async {
+  Future<void> _uploadVideo(UploadJob job) async {
     var attempt = 0;
     var forbiddenRetried = false;
     while (true) {
       final fresh =
-          job.videoUrl != null &&
-          job.videoUrlIssuedAt != null &&
-          _now().difference(job.videoUrlIssuedAt!) < _urlLifetime;
+          _videoUrl != null &&
+          _videoUrlIssuedAt != null &&
+          job.videoKey != null &&
+          _now().difference(_videoUrlIssuedAt!) < _urlLifetime;
       if (!fresh) {
         emit(const UploadVideoInProgress(UploadStage.video));
         final target = await _service.videoUrl();
-        job
-          ..videoUrl = target.url
-          ..videoKey = target.key
-          ..videoUrlIssuedAt = _now();
+        _videoUrl = target.url;
+        job.videoKey = target.key;
+        _videoUrlIssuedAt = _now();
+        await _persist();
       }
 
       final total = await job.video.length();
       emit(UploadVideoInProgress(UploadStage.video, totalBytes: total));
       try {
         await _service.put(
-          job.videoUrl!,
+          _videoUrl!,
           job.video,
           'video/mp4',
           cancel: _cancel,
@@ -166,7 +214,7 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
         if (e.code == 'upload_forbidden' && !forbiddenRetried) {
           // The URL expired or its signature didn't match: fetch a new one.
           forbiddenRetried = true;
-          job.videoUrl = null;
+          _videoUrl = null;
           continue;
         }
         if (e.code == 'upload_forbidden' || attempt >= retryDelays.length) {
@@ -177,8 +225,8 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
     }
   }
 
-  SavedVideo _alreadySaved(_Job job) => SavedVideo(
-    id: '',
+  SavedVideo _alreadySaved(UploadJob job) => SavedVideo(
+    id: job.savedVideoId ?? '',
     title: job.title,
     status: VideoStatus.pending,
     visibility: job.visibility,
@@ -189,27 +237,4 @@ class UploadVideoCubit extends Cubit<UploadVideoState> {
     _cancel?.cancel('closed');
     return super.close();
   }
-}
-
-class _Job {
-  _Job({
-    required this.title,
-    required this.description,
-    required this.visibility,
-    required this.video,
-    required this.thumbnail,
-  });
-
-  final String title;
-  final String description;
-  final VideoVisibility visibility;
-  final File video;
-  final File thumbnail;
-
-  String? thumbnailKey;
-  bool thumbnailUploaded = false;
-  String? videoKey;
-  String? videoUrl;
-  DateTime? videoUrlIssuedAt;
-  bool videoUploaded = false;
 }

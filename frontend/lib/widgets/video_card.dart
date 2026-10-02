@@ -35,135 +35,146 @@ class VideoCard extends StatelessWidget {
       timeAgo(video.createdAt),
     ].join(' · ');
 
-    return InkWell(
-      onTap: onTap,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AspectRatio(
-            aspectRatio: 16 / 9,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                CachedNetworkImage(
-                  imageUrl: video.thumbnailUrl,
-                  fit: BoxFit.cover,
-                  placeholder: (_, _) =>
-                      const ColoredBox(color: YtColors.surfaceHigh),
-                  errorWidget: (_, _, _) => const ColoredBox(
-                    color: YtColors.surfaceHigh,
-                    child: Icon(
-                      Icons.broken_image_outlined,
-                      color: YtColors.textSecondary,
-                      size: 36,
+    return Semantics(
+      button: true,
+      label: [
+        video.title,
+        if (video.durationSeconds != null)
+          formatDuration(video.durationSeconds!),
+        meta,
+        if (showOwnerInfo) status.label,
+      ].join(', '),
+      excludeSemantics: trailing == null,
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AspectRatio(
+              aspectRatio: 16 / 9,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CachedNetworkImage(
+                    imageUrl: video.thumbnailUrl,
+                    fit: BoxFit.cover,
+                    placeholder: (_, _) =>
+                        const ColoredBox(color: YtColors.surfaceHigh),
+                    errorWidget: (_, _, _) => const ColoredBox(
+                      color: YtColors.surfaceHigh,
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        color: YtColors.textSecondary,
+                        size: 36,
+                      ),
                     ),
                   ),
-                ),
-                if (video.durationSeconds != null)
-                  Positioned(
-                    right: 8,
-                    bottom: 8,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 5,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.8),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        formatDuration(video.durationSeconds!),
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+                  if (video.durationSeconds != null)
+                    Positioned(
+                      right: 8,
+                      bottom: 8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 5,
+                          vertical: 2,
                         ),
-                      ),
-                    ),
-                  ),
-                if (showOwnerInfo && status.isUnfinished)
-                  Positioned.fill(
-                    child: ColoredBox(
-                      color: Colors.black54,
-                      child: Center(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.8),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
                         child: Text(
-                          _pendingLabel(status),
-                          style: const TextStyle(fontWeight: FontWeight.w600),
+                          formatDuration(video.durationSeconds!),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-              ],
-            ),
-          ),
-          if (showOwnerInfo && status.isUnfinished)
-            LinearProgressIndicator(
-              value:
-                  status == VideoStatus.processing ||
-                      (progress?.percent ?? 0) > 0
-                  ? (progress?.percent ?? 0) / 100
-                  : null,
-              minHeight: 3,
-            ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 4, 16),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (!showOwnerInfo) ...[
-                  CircleAvatar(
-                    radius: 18,
-                    backgroundColor: YtColors.surfaceHigh,
-                    child: Text(
-                      video.creator.name.isEmpty
-                          ? '?'
-                          : video.creator.name[0].toUpperCase(),
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+                  if (showOwnerInfo && status.isUnfinished)
+                    Positioned.fill(
+                      child: ColoredBox(
+                        color: Colors.black54,
+                        child: Center(
+                          child: Text(
+                            _pendingLabel(status),
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
                 ],
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        video.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          height: 1.25,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        meta,
-                        style: const TextStyle(
-                          color: YtColors.textSecondary,
-                          fontSize: 12.5,
-                        ),
-                      ),
-                      if (showOwnerInfo) ...[
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 4,
-                          children: [
-                            StatusChip(status),
-                            VisibilityChip(video.effectiveVisibility),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                ?trailing,
-              ],
+              ),
             ),
-          ),
-        ],
+            if (showOwnerInfo && status.isUnfinished)
+              LinearProgressIndicator(
+                value:
+                    status == VideoStatus.processing ||
+                        (progress?.percent ?? 0) > 0
+                    ? (progress?.percent ?? 0) / 100
+                    : null,
+                minHeight: 3,
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 4, 16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (!showOwnerInfo) ...[
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: YtColors.surfaceHigh,
+                      child: Text(
+                        video.creator.name.isEmpty
+                            ? '?'
+                            : video.creator.name[0].toUpperCase(),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                  ],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          video.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            height: 1.25,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          meta,
+                          style: const TextStyle(
+                            color: YtColors.textSecondary,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                        if (showOwnerInfo) ...[
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: [
+                              StatusChip(status),
+                              VisibilityChip(video.effectiveVisibility),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  ?trailing,
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

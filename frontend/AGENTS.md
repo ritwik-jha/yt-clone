@@ -1,7 +1,7 @@
 # AGENTS.md — frontend (Flutter)
 
 Flutter client (Android + iOS) for the video platform. Read `PLAN.md` first;
-`README.md` has the run commands, layout, and milestone status.
+`README.md` has the layout and milestone status; `SETUP.md` has install/run steps.
 
 - The backend code in `../backend/app/` is the API contract. Don't copy request
   shapes from `../docs/*guide*.md` (PLAN §3 lists every divergence).
@@ -12,3 +12,6 @@ Flutter client (Android + iOS) for the video platform. Read `PLAN.md` first;
 - Dark, YouTube-like styling lives in `lib/core/theme.dart` (`YtColors`);
   don't hard-code colours in pages.
 - Before pushing: `dart format lib test`, `flutter analyze`, `flutter test`.
+- The backend URL comes from `ServerSettings` (compile-time `API_BASE_URL`, plus an
+  in-app override in debug builds only). Don't read `AppConfig.apiBaseUrl` directly.
+- Never persist presigned URLs (`UploadJob.toJson` omits them on purpose).

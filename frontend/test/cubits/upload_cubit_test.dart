@@ -24,6 +24,9 @@ ApiException _err(String code, {int status = 400}) => ApiException.fromResponse(
   <String, dynamic>{'code': code, 'detail': code},
 );
 
+/// Files compare by identity; the cubit may hold a copy of the same path.
+Matcher _fileAt(File f) => isA<File>().having((x) => x.path, 'path', f.path);
+
 void main() {
   late MockUploadService service;
   late Directory tmp;
@@ -106,7 +109,7 @@ void main() {
     verify(
       () => service.put(
         'https://s3/t',
-        thumb,
+        any(that: _fileAt(thumb)),
         'image/jpeg',
         cancel: any(named: 'cancel'),
       ),
@@ -114,7 +117,7 @@ void main() {
     verify(
       () => service.put(
         'https://s3/v',
-        video,
+        any(that: _fileAt(video)),
         'video/mp4',
         onProgress: any(named: 'onProgress'),
         cancel: any(named: 'cancel'),
