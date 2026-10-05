@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: allow cleartext HTTP so the app can reach a backend on
+     10.0.2.2 (emulator), localhost, or a LAN IP. Release builds get no config
+     and are HTTPS-only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

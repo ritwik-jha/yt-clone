@@ -10,8 +10,10 @@ Where those documents disagree with the backend as built, this plan follows
 the backend code (`backend/app/`). §3 lists every difference, so the spec's
 snippets can't be copied as they are.
 
-Status: not started. Nothing here has run on a device yet. The spikes in M0
-(§13) confirm the riskier assumptions before any later phase depends on them.
+Status: M0 scaffold, M1–M3, and most of M4 (resumable uploads, icon/splash,
+skeletons, semantics) are implemented and unit/widget tested (see
+`README.md`); nothing has run on a device yet. The spikes in M0 (§13) still
+need to confirm the riskier assumptions on real hardware.
 
 The backend and pipeline gaps this plan first identified (B1–B8 in §14) have
 been closed: HLS output for iOS, resend and password-reset endpoints, error

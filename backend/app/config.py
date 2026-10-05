@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # PostgreSQL. On ECS the password is never in the environment: the app
     # reads it from the RDS-managed secret named by DB_SECRET_ARN (see
     # app/db.py). DB_PASSWORD is for local runs against docker compose.
+    # DATABASE_URL, when set, replaces every DB_* value below. The test
+    # pipeline points it at SQLite (sqlite:///./test.db); production leaves
+    # it empty.
+    database_url: str = ""
     db_host: str = ""
     db_port: int = 5432
     db_name: str = ""
@@ -71,6 +75,8 @@ class Settings(BaseSettings):
             raise RuntimeError(f"missing required settings: {', '.join(missing)}")
 
     def require_database(self) -> None:
+        if self.database_url:
+            return
         self.require("db_host", "db_name", "db_user")
         if not (self.db_password or self.db_secret_arn):
             raise RuntimeError("missing required settings: DB_PASSWORD or DB_SECRET_ARN")
