@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import 'token_store.dart';
 
@@ -6,11 +7,21 @@ import 'token_store.dart';
 /// (plan §5.4). Retries go through the `bare` client to avoid deadlocking
 /// the queue.
 class AuthInterceptor extends QueuedInterceptor {
-  AuthInterceptor(this._tokens, this._bare, this._onSessionExpired);
+  AuthInterceptor(
+    this._tokens,
+    this._bare,
+    this._onSessionExpired, {
+    this.browserCookies = kIsWeb,
+  });
 
   final TokenStore _tokens;
   final Dio _bare;
   final void Function() _onSessionExpired;
+
+  /// On the web the tokens live in HttpOnly cookies the browser manages, so
+  /// the [TokenStore] stays empty and the refresh cookie is sent by the
+  /// browser rather than by us.
+  final bool browserCookies;
 
   static const skipPaths = {
     '/auth/signup',
@@ -65,9 +76,9 @@ class AuthInterceptor extends QueuedInterceptor {
       }
     }
 
-    request
-      ..headers['Authorization'] = 'Bearer ${await _tokens.accessToken()}'
-      ..extra['retried'] = true;
+    final token = await _tokens.accessToken();
+    if (token != null) request.headers['Authorization'] = 'Bearer $token';
+    request.extra['retried'] = true;
     try {
       handler.resolve(await _bare.fetch<dynamic>(request));
     } on DioException catch (e) {
@@ -77,11 +88,13 @@ class AuthInterceptor extends QueuedInterceptor {
 
   Future<bool> _refresh() async {
     final refresh = await _tokens.refreshToken();
-    if (refresh == null) return false;
+    if (refresh == null && !browserCookies) return false;
     try {
       await _bare.post<dynamic>(
         '/auth/refresh',
-        options: Options(headers: {'Cookie': 'refresh_token=$refresh'}),
+        options: refresh == null
+            ? null
+            : Options(headers: {'Cookie': 'refresh_token=$refresh'}),
       );
       return true; // CookieCapture stored the new access token
     } on DioException catch (e) {

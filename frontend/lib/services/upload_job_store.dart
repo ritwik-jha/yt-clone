@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -64,6 +65,9 @@ class UploadJobStore {
   }
 
   Future<List<UploadJob>> list() async {
+    // The web build has no file system (path_provider throws there), so it
+    // never has a job to resume.
+    if (kIsWeb) return const [];
     final root = await _rootProvider();
     if (!await root.exists()) return [];
     final jobs = <UploadJob>[];

@@ -168,7 +168,8 @@ class _HomeViewState extends State<_HomeView> {
                     title: Text('Backend server'),
                   ),
                 ),
-              if (kDebugMode)
+              // Web builds hold no token to corrupt (it's an HttpOnly cookie).
+              if (kDebugMode && !kIsWeb)
                 const PopupMenuItem(
                   value: 'expire',
                   child: ListTile(

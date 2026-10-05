@@ -192,7 +192,31 @@ void main() {
       verifyNever(() => auth.me());
     });
 
+    test('expired() is ignored unless signed in', () async {
+      session.expired();
+      expect(session.state, const SessionUnknown());
+    });
+
+    test('web: restore asks the server even with no stored token', () async {
+      SharedPreferences.setMockInitialValues({installedFlag: true});
+      session = SessionCubit(
+        auth: auth,
+        tokens: tokens,
+        prefs: await SharedPreferences.getInstance(),
+        browserCookies: true,
+      );
+      when(() => auth.me()).thenAnswer((_) async => _me);
+      await session.restore();
+      expect(session.state, const SessionAuthenticated(_me));
+
+      when(() => auth.me())
+          .thenThrow(_err('missing_access_token', status: 401));
+      await session.restore();
+      expect(session.state, const SessionUnauthenticated());
+    });
+
     test('expired() sets a message; logout clears', () async {
+      await session.signedIn(_me);
       session.expired();
       expect(
         session.state,

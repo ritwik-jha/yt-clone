@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/api_exception.dart';
 import '../core/token_store.dart';
@@ -49,7 +50,7 @@ class AuthService {
       'email': email.trim().toLowerCase(),
       'password': password,
     });
-    if (await _tokens.accessToken() == null) {
+    if (!kIsWeb && await _tokens.accessToken() == null) {
       throw const ApiException(
         kind: ApiErrorKind.server,
         message: 'Sign-in failed. Please try again.',

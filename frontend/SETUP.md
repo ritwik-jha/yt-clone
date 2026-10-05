@@ -226,6 +226,25 @@ picker, which Flutter can't drive, so that stays on the manual checklist
 (upload a short MP4 → watch it go Pending → Processing → Ready in *My videos* →
 play it → edit → delete).
 
+### Web build and the local E2E pipeline
+
+The app also builds for the web, which is how CI-style end-to-end runs work
+without a device. `scripts/run_pipeline.sh` at the repo root seeds a SQLite
+test database, starts the backend on it with fake Cognito/S3/Redis, and runs
+`integration_test/seeded_flow_test.dart` in headless Chrome (sign up → confirm
+→ sign in → feed → video page → *My videos* → edit → log out). See *Testing*
+in `../backend/README.md` for what it needs and how to run each step alone.
+
+On the web the session lives in HttpOnly cookies the browser manages, so
+serve the app from the same host as the API (`127.0.0.1` for both, ports may
+differ) or the browser won't send them. The web build is for testing and
+browsing only:
+
+- Playback shows a placeholder: `better_player_plus` has no web support.
+- Upload and resuming uploads need the native pickers and file system.
+- Log out clears the cookies but doesn't revoke the refresh token, because
+  the browser only sends that cookie to `/auth/refresh`.
+
 ## 7. Building
 
 ```bash

@@ -92,10 +92,16 @@ backend/
 ├── terraform/                         # ECS cluster + services, RDS, IAM, SGs, ECR, thumbnails bucket + CDN
 ├── scripts/
 │   ├── generate-env.sh                # terraform state -> .env (local dev)
-│   └── push-image.sh                  # build + push the image to ECR
+│   ├── push-image.sh                  # build + push the image to ECR
+│   └── seed_sqlite.py                 # fresh SQLite test.db with the seed records
+├── tests/
+│   ├── sanity/                        # unit tests + in-process app on SQLite
+│   ├── integration/                   # HTTP tests against a running test server
+│   └── support/                       # seed data, fake Cognito/S3/Redis, test server
 ├── Dockerfile                         # one image, both processes
 ├── docker-compose.yml                 # api + poller + local postgres/redis
 ├── requirements.txt
+├── requirements-dev.txt               # + pytest, httpx, fakeredis
 ├── .env.example
 ├── deployment-guide.md                # full deploy walkthrough
 └── README.md
@@ -272,3 +278,45 @@ docker compose up
 Compose binds the API to `127.0.0.1:8000` unless `API_BIND` says otherwise,
 and ships logs to CloudWatch — set `AWS_REGION` and have credentials
 available, or comment out the `logging:` blocks for a purely local run.
+
+## Testing
+
+The tests need no AWS account and no PostgreSQL. They run the real app on a
+SQLite file (`DATABASE_URL=sqlite:///./test.db`) with Cognito, S3 and Redis
+replaced by in-process fakes (`tests/support/fakes.py`). The seed records live
+in `tests/support/seed_data.py`: three users (password `Passw0rd!`, every
+confirmation and reset code `123456`) and eight videos covering each
+visibility and status.
+
+The whole pipeline (backend sanity, frontend analyze/test/web build, API
+integration tests, and the Flutter web E2E test in headless Chrome) is one
+script at the repo root:
+
+```bash
+pip install -r backend/requirements-dev.txt
+scripts/run_pipeline.sh              # or --from 3 / --only 4
+```
+
+It reseeds and restarts the server before each step that uses it, and removes
+`test.db` and its processes when it exits. Step 4 needs Chrome and a
+chromedriver of the same major version (`CHROME_EXECUTABLE`, `CHROMEDRIVER`).
+
+By hand:
+
+```bash
+cd backend
+python scripts/seed_sqlite.py                      # wipes and seeds ./test.db
+set -a; . tests/support/test.env; set +a
+uvicorn tests.support.server:app --port 8000 &     # the app on SQLite + fakes
+python -m pytest tests/sanity                      # no server needed, except test_live_server
+API_BASE_URL=http://127.0.0.1:8000 python -m pytest tests
+```
+
+The integration tests write to the database, so reseed and restart the server
+before running them again. Restart it after reseeding in any case: the old
+process keeps the deleted file open and fails with "readonly database".
+
+SQLite stands in for PostgreSQL only in tests: the schema comes from the ORM
+models (`Base.metadata.create_all`), not the Alembic revisions, and
+`DATABASE_URL` must stay unset in deployed environments.
+

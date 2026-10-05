@@ -37,6 +37,10 @@ class ApiClient {
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 30),
       headers: {Headers.acceptHeader: 'application/json'},
+      // On the web the browser hides Set-Cookie from Dart, so CookieCapture
+      // sees nothing: the browser stores the HttpOnly cookies and sends them
+      // itself. Ignored by the native adapters.
+      extra: {'withCredentials': kIsWeb},
     );
 
     final bare = Dio(apiOptions())..interceptors.add(CookieCapture(tokens));

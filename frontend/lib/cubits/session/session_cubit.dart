@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -16,11 +17,16 @@ class SessionCubit extends Cubit<SessionState> {
     required this._auth,
     required this._tokens,
     required this._prefs,
+    this.browserCookies = kIsWeb,
   }) : super(const SessionUnknown());
 
   final AuthService _auth;
   final TokenStore _tokens;
   final SharedPreferences _prefs;
+
+  /// Web builds: the session is HttpOnly cookies the app cannot read, so
+  /// [restore] asks `/auth/me` instead of looking for a stored token.
+  final bool browserCookies;
 
   bool get hasSignedInBefore => _prefs.getBool(hasSignedInBeforeFlag) ?? false;
 
@@ -38,7 +44,7 @@ class SessionCubit extends Cubit<SessionState> {
       await _prefs.setBool(installedFlag, true);
     }
 
-    if (await _tokens.refreshToken() == null) {
+    if (!browserCookies && await _tokens.refreshToken() == null) {
       await _tokens.clear();
       emit(const SessionUnauthenticated());
       return;
@@ -71,7 +77,9 @@ class SessionCubit extends Cubit<SessionState> {
 
   /// Called by the auth interceptor when a refresh fails with 401.
   void expired() {
-    if (state is SessionUnauthenticated) return;
+    // Only a live session can expire. During restore() (a web visit with no
+    // cookie) the 401 is handled there, without the "expired" message.
+    if (state is! SessionAuthenticated) return;
     emit(
       const SessionUnauthenticated(message: 'Session expired, sign in again'),
     );

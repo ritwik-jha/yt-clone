@@ -183,7 +183,13 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     Widget player;
     switch (state) {
       case VideoDetailReady(:final video):
-        if (video.isPlayable) {
+        if (kIsWeb) {
+          player = _PlayerMessage(
+            thumbnail: video.thumbnailUrl,
+            icon: Icons.desktop_access_disabled_outlined,
+            text: 'Playback is not available in the web build yet',
+          );
+        } else if (video.isPlayable) {
           _ensurePlayer(video);
           player = BetterPlayer(controller: _player!);
         } else {
@@ -217,7 +223,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
         );
     }
 
-    final aspect = state is VideoDetailReady && video.isPlayable
+    final aspect = state is VideoDetailReady && video.isPlayable && !kIsWeb
         ? _aspectRatio
         : 16 / 9;
 

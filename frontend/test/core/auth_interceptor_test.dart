@@ -132,4 +132,30 @@ void main() {
     );
     expect(expired, 0);
   });
+
+  test('web: refresh relies on the browser cookie, no Bearer null', () async {
+    await tokens.clear();
+    final headers = <String?>[];
+    final webApi = Dio(BaseOptions(baseUrl: 'http://x'))
+      ..interceptors.addAll([
+        AuthInterceptor(tokens, bare, () => expired++, browserCookies: true),
+        InterceptorsWrapper(
+          onRequest: (o, h) {
+            headers.add(o.headers['Authorization'] as String?);
+            h.next(o);
+          },
+        ),
+      ]);
+    DioAdapter(dio: webApi)
+        .onGet('/video/mine', (s) => s.reply(401, {'code': 'token_invalid'}));
+    bareAdapter
+      ..onPost('/auth/refresh', (s) => s.reply(200, {'message': 'ok'}))
+      ..onGet('/video/mine', (s) => s.reply(200, {'items': <dynamic>[]}));
+
+    final res = await webApi.get<Map<String, dynamic>>('/video/mine');
+    expect(res.data!['items'], isEmpty);
+    expect(headers, [null]);
+    expect(refreshCookies, [null]);
+    expect(expired, 0);
+  });
 }
