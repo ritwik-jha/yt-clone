@@ -90,7 +90,8 @@ fresh_backend() {
   (
     cd "$BACKEND"
     set -a; . tests/support/test.env; set +a
-    export DATABASE_URL="sqlite:///$DB"
+    # Git Bash paths (/c/...) are not valid SQLite URLs for a native Python.
+    export DATABASE_URL="sqlite:///$(cygpath -m "$DB" 2>/dev/null || echo "$DB")"
     export CORS_ORIGINS="http://127.0.0.1:$WEB_PORT"
     export FAKE_S3_URL="$API_URL/_s3"
     exec "$PYTHON" -m uvicorn tests.support.server:app --host 127.0.0.1 --port "$API_PORT"

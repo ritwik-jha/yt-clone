@@ -87,7 +87,7 @@ Run each command and check the version:
 | Terraform | `terraform version` | ≥ 1.5 (the stacks pin the AWS provider `~> 6.23`) |
 | Docker with buildx, daemon running | `docker buildx version && docker info >/dev/null` | |
 | Flutter (stable) | `flutter --version` | 3.47.x (Dart ≥ 3.13.5) |
-| Python | `python3 --version` | ≥ 3.11 |
+| Python | `python --version` | ≥ 3.11 |
 | ffmpeg | `ffmpeg -version` | any (makes the test video) |
 | jq, curl, git | `jq --version` | any |
 
@@ -133,6 +133,8 @@ export NAME_SUFFIX=$ACCOUNT_ID-$REGION
 export TRANSCODER_ARCH=$TRANSCODER_ARCH
 export TRANSCODER_PLATFORM=$TRANSCODER_PLATFORM
 export REPO_ROOT=$(pwd)
+# scripts/run_pipeline.sh defaults to python3; the venv only provides python.
+export PYTHON=python
 EOF
 cat deploy-artifacts/env.sh
 ```
@@ -162,9 +164,10 @@ local SQLite backend.
 
 ```bash
 source deploy-artifacts/env.sh
-python3 -m venv deploy-artifacts/venv
-deploy-artifacts/venv/bin/pip install -q -r backend/requirements-dev.txt playwright
-export PATH="$REPO_ROOT/deploy-artifacts/venv/bin:$PATH"
+python -m venv deploy-artifacts/venv
+VENV_BIN="deploy-artifacts/venv/bin"; [ -d deploy-artifacts/venv/Scripts ] && VENV_BIN="deploy-artifacts/venv/Scripts"   # Windows venvs use Scripts/
+"$VENV_BIN/python" -m pip install -q -r backend/requirements-dev.txt playwright
+export PATH="$REPO_ROOT/$VENV_BIN:$PATH"
 scripts/run_pipeline.sh --only 1     # backend sanity
 scripts/run_pipeline.sh --only 2     # flutter analyze + unit/widget tests + web build
 scripts/run_pipeline.sh --only 3     # API integration
@@ -175,7 +178,7 @@ version. If both are installed, also run step 4:
 
 ```bash
 source deploy-artifacts/env.sh
-export PATH="$REPO_ROOT/deploy-artifacts/venv/bin:$PATH"
+export PATH="$REPO_ROOT/deploy-artifacts/venv/Scripts:$REPO_ROOT/deploy-artifacts/venv/bin:$PATH"   # Scripts/ on Windows, bin/ elsewhere
 CHROME_EXECUTABLE=/path/to/chrome CHROMEDRIVER=/path/to/chromedriver scripts/run_pipeline.sh --only 4
 ```
 
@@ -459,10 +462,10 @@ the way a browser would:
 
 ```bash
 source deploy-artifacts/env.sh
-export PATH="$REPO_ROOT/deploy-artifacts/venv/bin:$PATH"
-python3 -m playwright install chromium        # once; skip if already installed
+export PATH="$REPO_ROOT/deploy-artifacts/venv/Scripts:$REPO_ROOT/deploy-artifacts/venv/bin:$PATH"   # Scripts/ on Windows, bin/ elsewhere
+python -m playwright install chromium        # once; skip if already installed
 POOL_ID="$(terraform -chdir=IAC/terraform output -raw cognito_user_pool_id)"
-python3 scripts/deploy_smoke_test.py "$FRONTEND_URL" \
+python scripts/deploy_smoke_test.py "$FRONTEND_URL" \
   --user-pool-id "$POOL_ID" --region "$AWS_REGION" \
   --browser --artifacts deploy-artifacts
 ```
@@ -531,7 +534,7 @@ terraform -chdir=IAC/terraform output -raw cloudfront_domain_name; echo
 | CloudFront 403/404 on manifests right after the first apply | The distribution may still be deploying: `aws cloudfront get-distribution --id $(terraform -chdir=IAC/terraform output -raw cloudfront_distribution_id) --query Distribution.Status` must be `Deployed` |
 | Upload PUT 403 | Clock skew or an expired URL; re-run. The test sends exactly `video/mp4` / `image/jpeg` |
 | Docker push: `no basic auth credentials` / `403` | ECR login expired (12 h); re-run the `get-login-password` line |
-| `python3 -m playwright install chromium` can't download | Pass `--chromium` with a local Chrome/Chromium, or drop `--browser` and say so in the report |
+| `python -m playwright install chromium` can't download | Pass `--chromium` with a local Chrome/Chromium, or drop `--browser` and say so in the report |
 | Reload of `/watch?...` shows an nginx 404 | The image was built without `deploy/nginx.conf.template`; rebuild from `frontend/` with `-f deploy/Dockerfile` |
 
 ---
