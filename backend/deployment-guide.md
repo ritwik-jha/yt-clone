@@ -110,7 +110,10 @@ One value is required and has no default:
 |---|---|
 | `thumbnails_bucket_name` | a globally unique S3 bucket name |
 
-Set `cors_origins` to your frontend origin(s). Check `aws_region` matches
+Hosting the web app on the API's own domain (one CloudFront in front of
+both, see `frontend/SETUP.md` §5) needs no CORS: leave `cors_origins` empty.
+If the app lives on another origin, set `cors_origins` to it, and if that is
+another site, `cookie_samesite = "none"`. Check `aws_region` matches
 the pipeline — a mismatch fails the plan.
 
 The database defaults to a single-AZ `db.t4g.micro` with 20 GB of gp3

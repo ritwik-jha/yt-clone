@@ -34,13 +34,18 @@ settings.require_database()
 
 app = FastAPI(title="Video Platform Backend", version="2.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origin_list or ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# The web app calls the API with the browser's auth cookies, so a
+# cross-origin caller must be named in CORS_ORIGINS. Empty means the app is
+# served from the API's own origin and no cross-origin call is allowed; a
+# wildcard would let any site make requests as the signed-in user.
+if settings.cors_origin_list:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origin_list,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["Content-Type"],
+    )
 
 
 # Every error body carries a stable `code` next to `detail` (app/errors.py).

@@ -7,8 +7,8 @@ packaged as DASH and HLS; a completion queue carries status back to the
 backend, which keeps users and videos in RDS PostgreSQL; per-video progress
 is published to Redis and read back through the API.
 
-There is no client application in this repository — it is backend and
-infrastructure only.
+The client is a Flutter web app (dark, YouTube-style, from the Figma
+"YouTube UI Clone" mockups) in `frontend/`; see `frontend/README.md`.
 
 ---
 
@@ -34,6 +34,8 @@ infrastructure only.
 │   ├── transcoder/                Fargate container (ffmpeg -> DASH + HLS)
 │   ├── deployment-guide.md        Step-by-step deploy walkthrough
 │   └── AGENTS.md
+│
+├── frontend/                      Flutter web app: lib/, web/, test/, integration_test/
 │
 └── docs/                          Specs and design guides (see "Design docs" below)
 ```
@@ -196,7 +198,7 @@ Known divergences:
 | `ecs-sqs-deployment-guide.md` | Long-running Python SQS consumer daemon dispatches tasks | Lambda event source mapping dispatches tasks |
 | `ecs-task-definition-spec.md` | Hand-written `task-definition.json` | `aws_ecs_task_definition` in `IAC/terraform/ecs.tf` |
 | several | Backend processes under systemd in a venv | ECS services (Express Mode API + Fargate poller), provisioned by `backend/terraform` |
-| several | Flutter client flows | no client in this repo |
+| several | Flutter mobile client flows | Flutter web app in `frontend/` (see its README) |
 
 `video-streaming-scaling-and-bottlenecks.md` is forward-looking analysis
 of scaling limits; most of it is not built yet.
@@ -205,5 +207,9 @@ of scaling limits; most of it is not built yet.
 
 ## Project state
 
-Infrastructure and application code are written but not yet deployed, and
-there are no tests or CI.
+Infrastructure and application code are written but not yet deployed. The
+pipeline has no tests. The backend has sanity and integration tests on a
+seeded SQLite database with fake AWS clients, and `scripts/run_pipeline.sh`
+runs them together with the web app's checks and a headless-Chrome E2E (see
+*Testing* in `backend/README.md`). The web app has unit and widget tests and
+a GitHub Actions workflow (`.github/workflows/frontend.yml`).

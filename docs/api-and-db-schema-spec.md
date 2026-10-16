@@ -75,7 +75,7 @@ Authenticates user credentials against AWS Cognito and sets secure, encrypted se
 | Cookie Name | Attributes | Description |
 | :--- | :--- | :--- |
 | `access_token` | `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/` | Encrypted JWT access token issued by identity provider |
-| `refresh_token` | `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/auth/refresh` | Encrypted refresh token for renewing expired sessions |
+| `refresh_token` | `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/auth` | Encrypted refresh token for renewing expired sessions (sent to `/auth/refresh` and `/auth/logout`) |
 
 #### Response Body Schema (200 OK)
 | Field | Type | Description |
@@ -196,7 +196,7 @@ Records uploaded video metadata into the database and sets initial processing st
 ## 3. Video Playback & Feed APIs (`/video`)
 
 ### 3.1 Get Home Video Feed (`GET /video/feed`)
-Retrieves a paginated list of publicly available, fully processed videos for the mobile application home feed.
+Retrieves a paginated list of publicly available, fully processed videos for the web app's home feed.
 
 * **HTTP Method**: `GET`
 * **Path**: `/video/feed`
@@ -204,6 +204,7 @@ Retrieves a paginated list of publicly available, fully processed videos for the
 * **Query Parameters**:
   * `page` (Integer, Default: `1`): Page index.
   * `limit` (Integer, Default: `10`, Max: `50`): Number of items per page.
+  * `sort` (String, Default: `latest`): `latest` (newest first) or `popular` (most viewed first).
 
 #### Response Body Schema (200 OK)
 | Field | Type | Description |
@@ -227,6 +228,24 @@ Retrieves a paginated list of publicly available, fully processed videos for the
 | `created_at` | String (ISO 8601) | Upload timestamp |
 
 ---
+
+### 3.1a Search Videos (`GET /video/search`)
+Public, fully processed videos whose title or description contains every word of the query (case-insensitive).
+
+* **HTTP Method**: `GET`
+* **Path**: `/video/search`
+* **Authentication**: None
+* **Query Parameters**: `q` (String, 1–100 characters, required), plus `page`, `limit`, and `sort` as for the feed.
+* **Response**: same shape as the feed. A query of only spaces is `400` with code `empty_query`.
+
+### 3.1b Channel (`GET /video/channel/{user_id}`)
+A creator and their public, fully processed videos. Private, unlisted, and unfinished videos are never listed here, whoever asks.
+
+* **HTTP Method**: `GET`
+* **Path**: `/video/channel/{user_id}`
+* **Authentication**: None
+* **Query Parameters**: `page`, `limit`, and `sort` as for the feed.
+* **Response**: the feed's shape plus `creator` (`id`, `name`, `created_at`). Unknown user: `404` with code `channel_not_found`.
 
 ### 3.2 Get Video Details by ID (`GET /video/{video_id}`)
 Fetches detailed metadata and streaming manifest URLs for a single video.

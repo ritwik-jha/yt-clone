@@ -36,7 +36,9 @@ than touching its resources. Deploy the pipeline first.
 | GET  | `/upload/video/url` | cookie | Presigned PUT for raw MP4 |
 | GET  | `/upload/video/url/thumbnail` | cookie | Presigned PUT for thumbnail JPEG |
 | POST | `/upload/video/save` | cookie | Insert the `videos` row (status=PENDING) |
-| GET  | `/video/feed` | – | Paginated PUBLIC + COMPLETED videos, newest first |
+| GET  | `/video/feed` | – | Paginated PUBLIC + COMPLETED videos, newest first (`sort=popular`: most viewed first) |
+| GET  | `/video/search` | – | Listed videos whose title or description has every word of `q`; same paging and `sort` |
+| GET  | `/video/channel/{user_id}` | – | A creator (`id`, `name`, `created_at`) and their listed videos; 404 `channel_not_found` |
 | GET  | `/video/mine` | cookie | Paginated list of the caller's videos, any status |
 | GET  | `/video/{video_id}` | optional | One video; cached in Redis `video:meta:<id>` |
 | PATCH | `/video/{video_id}` | cookie, owner | Edit title, description, visibility |
@@ -58,10 +60,18 @@ field errors as `detail`; a database outage returns 503
 `database_unavailable`.
 
 Cookies set by login: `access_token` (1h, `Path=/`) and `refresh_token` (5d,
-`Path=/auth/refresh`), `HttpOnly`, `Secure` (configurable), `SameSite=lax`.
-Because of that path, browsers never send the refresh token to
-`/auth/logout`, so logout revokes it only for clients that attach cookies
-themselves. `get_current_user` also accepts `Authorization: Bearer <token>`.
+`Path=/auth`), `HttpOnly`, `Secure` (configurable), `SameSite=lax`. The
+browser sends the refresh token only to `/auth/refresh` and `/auth/logout`,
+which revokes it. A refresh cookie left at the old `Path=/auth/refresh` is
+expired by every login, refresh, and logout. The cookies are the only
+credential: the web app is the only client, so there is no `Authorization`
+header path.
+
+CORS is off unless `CORS_ORIGINS` lists origins. Serve the web app from the
+API's own origin and leave it empty; otherwise list the app's exact origin
+(and use `COOKIE_SAMESITE=none` if it is a different site, see
+`frontend/SETUP.md` §5). There is no wildcard: with credentials allowed, it
+would let any site act as the signed-in user.
 
 ---
 
@@ -92,10 +102,16 @@ backend/
 ├── terraform/                         # ECS cluster + services, RDS, IAM, SGs, ECR, thumbnails bucket + CDN
 ├── scripts/
 │   ├── generate-env.sh                # terraform state -> .env (local dev)
-│   └── push-image.sh                  # build + push the image to ECR
+│   ├── push-image.sh                  # build + push the image to ECR
+│   └── seed_sqlite.py                 # fresh SQLite test.db with the seed records
+├── tests/
+│   ├── sanity/                        # unit tests + in-process app on SQLite
+│   ├── integration/                   # HTTP tests against a running test server
+│   └── support/                       # seed data, fake Cognito/S3/Redis, test server
 ├── Dockerfile                         # one image, both processes
 ├── docker-compose.yml                 # api + poller + local postgres/redis
 ├── requirements.txt
+├── requirements-dev.txt               # + pytest, httpx, fakeredis
 ├── .env.example
 ├── deployment-guide.md                # full deploy walkthrough
 └── README.md
@@ -272,3 +288,48 @@ docker compose up
 Compose binds the API to `127.0.0.1:8000` unless `API_BIND` says otherwise,
 and ships logs to CloudWatch — set `AWS_REGION` and have credentials
 available, or comment out the `logging:` blocks for a purely local run.
+
+## Testing
+
+The tests need no AWS account and no PostgreSQL. They run the real app on a
+SQLite file (`DATABASE_URL=sqlite:///./test.db`) with Cognito, S3 and Redis
+replaced by in-process fakes (`tests/support/fakes.py`). Presigned upload
+URLs point at the test server's own in-memory buckets under `/_s3/`
+(`FAKE_S3_URL`), which accept a browser's cross-origin PUT and, like S3,
+refuse one whose `Content-Type` differs from the signed one. The seed records live
+in `tests/support/seed_data.py`: three users (password `Passw0rd!`, every
+confirmation and reset code `123456`) and eight videos covering each
+visibility and status.
+
+The whole pipeline (backend sanity, frontend analyze/test/web build, API
+integration tests, and the Flutter web E2E test in headless Chrome) is one
+script at the repo root:
+
+```bash
+pip install -r backend/requirements-dev.txt
+scripts/run_pipeline.sh              # or --from 3 / --only 4
+```
+
+It reseeds and restarts the server before each step that uses it, and removes
+`test.db` and its processes when it exits. Step 4 needs Chrome and a
+chromedriver of the same major version (`CHROME_EXECUTABLE`, `CHROMEDRIVER`).
+
+By hand:
+
+```bash
+cd backend
+python scripts/seed_sqlite.py                      # wipes and seeds ./test.db
+set -a; . tests/support/test.env; set +a
+uvicorn tests.support.server:app --port 8000 &     # the app on SQLite + fakes
+python -m pytest tests/sanity                      # no server needed, except test_live_server
+API_BASE_URL=http://127.0.0.1:8000 python -m pytest tests
+```
+
+The integration tests write to the database, so reseed and restart the server
+before running them again. Restart it after reseeding in any case: the old
+process keeps the deleted file open and fails with "readonly database".
+
+SQLite stands in for PostgreSQL only in tests: the schema comes from the ORM
+models (`Base.metadata.create_all`), not the Alembic revisions, and
+`DATABASE_URL` must stay unset in deployed environments.
+

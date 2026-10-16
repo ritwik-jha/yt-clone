@@ -196,6 +196,10 @@ class FeedResponse(BaseModel):
     items: list[FeedItem]
 
 
+class ChannelResponse(FeedResponse):
+    creator: CreatorDetail
+
+
 class MyVideosResponse(BaseModel):
     total: int
     page: int

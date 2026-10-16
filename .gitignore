@@ -3,8 +3,14 @@
 !.env.example
 
 .venv/
+.pytest_cache/
+
 __pycache__/
 *.py[cod]
+
+# SQLite test database (scripts/run_pipeline.sh, backend/scripts/seed_sqlite.py)
+backend/test.db
+backend/test.db-*
 
 # terraform
 IAC/terraform/.terraform/

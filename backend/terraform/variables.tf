@@ -213,7 +213,7 @@ variable "poller_desired_count" {
 # --- Application settings (become task environment) ----------------------
 
 variable "cors_origins" {
-  description = "Browser origins allowed to call the API with credentials. Empty allows any origin."
+  description = "Browser origins allowed to call the API with credentials (the web app's origin when it is not served from the API's own). Empty allows none: same-origin only."
   type        = list(string)
   default     = []
 }
@@ -225,7 +225,7 @@ variable "cookie_secure" {
 }
 
 variable "cookie_samesite" {
-  description = "SameSite attribute for auth cookies (lax, strict, none)."
+  description = "SameSite attribute for auth cookies (lax, strict, none). Keep lax when the web app shares the API's site; none (with cookie_secure) when it is served from another site."
   type        = string
   default     = "lax"
 

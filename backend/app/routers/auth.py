@@ -1,9 +1,8 @@
 """Auth routes — Cognito wrapper + PostgreSQL users mirror.
 
 Tokens travel only in HttpOnly cookies and are never logged. The refresh
-cookie is scoped to Path=/auth/refresh, so a browser sends it nowhere else;
-native clients that attach cookies themselves also send it to /auth/logout,
-which revokes it.
+cookie is scoped to Path=/auth, so the browser sends it to /auth/refresh and
+to /auth/logout (which revokes it) and to no other API path.
 """
 
 import logging
@@ -32,7 +31,11 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 REFRESH_COOKIE = "refresh_token"
-REFRESH_PATH = "/auth/refresh"
+REFRESH_PATH = "/auth"
+# Where the refresh cookie lived before it moved to /auth. Browsers that
+# still hold one would keep sending it to /auth/refresh, so every response
+# that sets or clears the refresh cookie also expires this one.
+LEGACY_REFRESH_PATH = "/auth/refresh"
 
 _THROTTLED = {
     "TooManyRequestsException",
@@ -68,6 +71,11 @@ def _raise_cognito(
         raise APIError(429, "too_many_attempts", "Too many attempts, try again later") from None
     log.error("Cognito %s failed: %s", operation, cognito_code)
     raise APIError(500, "identity_provider_error", "Identity provider error") from None
+
+
+def _set_refresh_cookie(response: Response, value: str) -> None:
+    _clear_cookie(response, REFRESH_COOKIE, LEGACY_REFRESH_PATH)
+    _set_cookie(response, REFRESH_COOKIE, value, get_settings().refresh_cookie_max_age, REFRESH_PATH)
 
 
 def _set_cookie(response: Response, name: str, value: str, max_age: int, path: str) -> None:
@@ -244,7 +252,7 @@ def login(data: LoginRequest, response: Response):
         )
 
     _set_cookie(response, ACCESS_COOKIE, result["AccessToken"], s.access_cookie_max_age, "/")
-    _set_cookie(response, REFRESH_COOKIE, result["RefreshToken"], s.refresh_cookie_max_age, REFRESH_PATH)
+    _set_refresh_cookie(response, result["RefreshToken"])
     return MessageResponse(message="Login successful")
 
 
@@ -275,7 +283,7 @@ def refresh(request: Request, response: Response):
     _set_cookie(response, ACCESS_COOKIE, result["AccessToken"], s.access_cookie_max_age, "/")
     # Present only when refresh token rotation is enabled on the app client.
     if result.get("RefreshToken"):
-        _set_cookie(response, REFRESH_COOKIE, result["RefreshToken"], s.refresh_cookie_max_age, REFRESH_PATH)
+        _set_refresh_cookie(response, result["RefreshToken"])
     return MessageResponse(message="Session refreshed")
 
 
@@ -299,6 +307,7 @@ def logout(request: Request, response: Response):
 
     _clear_cookie(response, ACCESS_COOKIE, "/")
     _clear_cookie(response, REFRESH_COOKIE, REFRESH_PATH)
+    _clear_cookie(response, REFRESH_COOKIE, LEGACY_REFRESH_PATH)
     return MessageResponse(message="Logged out")
 
 

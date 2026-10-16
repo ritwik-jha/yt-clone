@@ -45,10 +45,26 @@ def _connect_with_secret(dialect, conn_rec, cargs, cparams):
     return dialect.connect(*cargs, **cparams)
 
 
+def _url_engine(url: str) -> Engine:
+    """Engine for an explicit DATABASE_URL (tests run on SQLite)."""
+    if not url.startswith("sqlite"):
+        return create_engine(url, pool_pre_ping=True)
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+
+    # SQLite ignores foreign keys, so ON DELETE CASCADE, unless asked.
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_conn, _record):
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+    return engine
+
+
 @lru_cache
 def get_engine() -> Engine:
     s = get_settings()
     s.require_database()
+    if s.database_url:
+        return _url_engine(s.database_url)
     engine = create_engine(
         URL.create(
             "postgresql+psycopg",

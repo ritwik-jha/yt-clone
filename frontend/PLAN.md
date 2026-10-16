@@ -1,5 +1,11 @@
 # Flutter Frontend — Implementation Plan
 
+> **Superseded on platform: the client is now a web app.** Sections 1–15
+> describe the original Android/iOS plan and are kept for its decisions on
+> the API contract, errors, uploads, and states, which still hold. §16
+> records what changed for the web: targets, session handling, playback,
+> uploads, routing, and the UI (from the Figma mockups).
+
 This plan covers the Flutter client for the video platform: what to build,
 how it talks to the backend in `../backend/`, and in what order. The screens
 come from `../docs/frontend-screens-spec.md`. The Flutter snippets in
@@ -10,8 +16,10 @@ Where those documents disagree with the backend as built, this plan follows
 the backend code (`backend/app/`). §3 lists every difference, so the spec's
 snippets can't be copied as they are.
 
-Status: not started. Nothing here has run on a device yet. The spikes in M0
-(§13) confirm the riskier assumptions before any later phase depends on them.
+Status: M0 scaffold, M1–M3, and most of M4 (resumable uploads, icon/splash,
+skeletons, semantics) are implemented and unit/widget tested (see
+`README.md`); nothing has run on a device yet. The spikes in M0 (§13) still
+need to confirm the riskier assumptions on real hardware.
 
 The backend and pipeline gaps this plan first identified (B1–B8 in §14) have
 been closed: HLS output for iOS, resend and password-reset endpoints, error
@@ -1586,7 +1594,7 @@ the app's behaviour in §4–§8 depends on them. B9 is the only open item.
 | B6 | `PATCH /video/{id}` (title, description, visibility) and `DELETE /video/{id}` (row, cache key, then the S3 objects in the background), owner only | `backend/app/routers/video.py`, `schemas.py` (`UpdateVideoRequest`), `cache.py` (`drop_video`); `backend/terraform/iam.tf` (S3 delete), `ecs.tf` (`S3_PROCESSED_BUCKET`) | Player and My Videos (§6.6, §6.7) | Done. CloudFront may serve a deleted video's segments until its cache expires |
 | B7 | `POST /video/{id}/view`: atomic `views_count + 1`, 204; `video_not_ready` unless COMPLETED | `backend/app/routers/video.py` | Feed, player (§6.4, §6.6) | Done. No per-viewer dedupe; the cached detail lags by up to 1 h |
 | B8 | A ladder of bounding boxes that keeps the source's aspect ratio, with rotation metadata applied | `IAC/transcoder/transcoder.py` (`LADDER`) | Playback (§8.4) | Done |
-| B9 | Web only: `cors_origins`, `cookie_samesite = "none"`, `thumbnails_cors_origins`. Note that a browser never sends the refresh cookie to `/auth/logout` (its path is `/auth/refresh`), so logout on web doesn't revoke it | `backend/terraform` tfvars, `auth.py` | M5 | Open. Not needed until the web target starts |
+| B9 | Web: the refresh cookie moved to `Path=/auth` so the browser also sends it to `/auth/logout`, which revokes it (the old `/auth/refresh` cookie is expired on every login, refresh, and logout); CORS is off unless `CORS_ORIGINS` names origins; cookie-only auth (the Bearer fallback is gone); `GET /video/search`, `GET /video/channel/{id}`, and `sort=popular` for the web UI | `backend/app/routers/auth.py`, `deps.py`, `main.py`, `routers/video.py`, `schemas.py` | §16 | Done |
 
 ---
 
@@ -1660,3 +1668,25 @@ App                                  API                               Cognito
  |-- GET /video/mine (bare, Bearer new) ->|                               |
  |<-- 200 ----------------------------|                                   |
 ```
+
+---
+
+## 16. The web app (replaces the mobile targets)
+
+The client moved from Android/iOS to Flutter web. What changed, and why:
+
+| # | Decision | Choice | Why |
+|---|---|---|---|
+| W1 | Targets | Web only; `android/`, `ios/`, and every native plugin removed | One client to build and ship. Browsers cover desktop and phones |
+| W2 | Session | HttpOnly cookies held by the browser (`withCredentials`); no token store, no `Authorization` header. Refresh on 401 (single-flight) plus a 50-minute renewal timer | The app can't read `Set-Cookie` on the web, and shouldn't hold tokens anyway. The timer keeps optional-auth reads (owner viewing their private video) from turning anonymous when the access cookie expires |
+| W3 | Signed-out browsing | Home, search, watch, and channel work without a session; Upload and Your videos redirect to Sign in and back | Matches the API (feed, detail, and channel are public) and how video sites work |
+| W4 | Routing | `go_router` with real paths: `/`, `/results?search_query=`, `/watch?v=`, `/channel/:id[/videos]`, `/my-videos`, `/upload`, auth pages | Shareable links, browser back/forward, reloads |
+| W5 | Playback | `<video>` through `HtmlElementView`; HLS via hls.js (native in Safari), DASH via dash.js for videos without `hls_url`; libraries vendored in `web/vendor/` and loaded on first use; controls drawn in Flutter | No CDN dependency at runtime, one look across browsers, keyboard shortcuts |
+| W6 | Uploads | Pick or drop a `File`; PUT it to the presigned URL with XHR (progress, abort) straight from the browser; thumbnail captured from the video on a canvas or picked and re-encoded as JPEG; the upload belongs to the app, survives navigation, and warns before the tab closes | No multi-GB copy into Dart memory; no native picker or file system; resumable jobs (§7.5) don't apply to a browser tab |
+| W7 | Browser APIs | Behind `Browser` and `PlayerController` interfaces (`lib/platform/`), with VM stubs | Widget tests run on the VM over the whole app |
+| W8 | UI | The Figma "YouTube UI Clone" mockups: 56px masthead with search, 240px guide (72px rail on medium widths, drawer on narrow ones and on the watch page), chip bar, 16:9 grid, watch page with up-next column, channel page with HOME/VIDEOS tabs and shelves | The design the product owner chose |
+| W9 | What the mockup shows but the API lacks | Left out: likes, comments, subscriptions, history, notifications, voice search | No dead controls |
+
+Backend changes for the web are B9 in §14. Hosting (same-origin
+recommended, SPA fallback to `index.html`) is in `SETUP.md` §5.
+

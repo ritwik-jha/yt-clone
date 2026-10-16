@@ -74,7 +74,9 @@ backend/
 | GET  | `/upload/video/url` | cookie | Presigned PUT for raw MP4 (key `videos/<sub>/<uuid>.mp4`) |
 | GET  | `/upload/video/url/thumbnail` | cookie | Presigned PUT for thumbnail JPEG (key `thumbnails/<sub>/<uuid>`) |
 | POST | `/upload/video/save` | cookie | Insert `videos` row (status=PENDING); 409 if the key is already saved |
-| GET  | `/video/feed` | – | PUBLIC + COMPLETED, paginated (`page`, `limit` ≤ 50), newest first |
+| GET  | `/video/feed` | – | PUBLIC + COMPLETED, paginated (`page`, `limit` ≤ 50), newest first; `sort=popular` orders by views |
+| GET  | `/video/search` | – | PUBLIC + COMPLETED whose title or description contains every word of `q` (case-insensitive, LIKE wildcards literal); paged and sorted like the feed |
+| GET  | `/video/channel/{user_id}` | – | The user (`id`, `name`, `created_at`, never the email) + their PUBLIC + COMPLETED videos; 404 `channel_not_found` |
 | GET  | `/video/mine` | cookie | Caller's videos, any status, paginated |
 | GET  | `/video/{video_id}` | optional | `video:meta` cache, else PostgreSQL; 404 unless viewable |
 | PATCH | `/video/{video_id}` | cookie, owner | Edit title / description / visibility; drops the `video:meta` key |
@@ -174,9 +176,15 @@ only. The local `.env` is gitignored, written mode 600, and excluded by
 - HTTPOnly cookies are set on login. `Secure`/`SameSite` come from
   `COOKIE_SECURE` / `COOKIE_SAMESITE`: the `cookie_secure` /
   `cookie_samesite` tfvars in ECS, `.env` locally.
-- `get_current_user` prefers the `access_token` cookie, falls back to
-  `Authorization: Bearer <token>` for mobile clients that can't hold
-  cookies. Both paths validate via Cognito `GetUser`.
+- The `access_token` cookie is the only credential (`Path=/`); there is no
+  `Authorization` header path (the web app is the only client).
+  `get_current_user` validates it with Cognito `GetUser`.
+- The `refresh_token` cookie has `Path=/auth`, so browsers send it to
+  `/auth/refresh` and `/auth/logout` (which revokes it) and nowhere else.
+  Responses that set or clear it also expire a leftover cookie at the old
+  `Path=/auth/refresh`.
+- CORS: `main.py` adds the middleware only when `CORS_ORIGINS` names origins
+  (credentials allowed, so never a wildcard). Empty means same-origin only.
 
 ## Poller worker
 

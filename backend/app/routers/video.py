@@ -1,11 +1,11 @@
-"""Video APIs — public feed, my videos, one video, live progress, view
-counting, and owner edit/delete.
+"""Video APIs — public feed, search, channel pages, my videos, one video,
+live progress, view counting, and owner edit/delete.
 
 Visibility rules: anyone may read a COMPLETED video that is PUBLIC or
 UNLISTED; only the owner may read a PRIVATE one or one that is not finished
 yet. Everyone else gets 404, so a private video's existence does not leak.
 Edit and delete are owner-only and answer 404 to everyone else for the same
-reason. The feed lists PUBLIC + COMPLETED only.
+reason. The feed, search, and channel pages list PUBLIC + COMPLETED only.
 
 Playback and thumbnail URLs are derived from the stored S3 keys at read time,
 so moving a CloudFront distribution needs no data migration.
@@ -16,13 +16,13 @@ after POST /upload/video/save.
 
 import logging
 from pathlib import PurePosixPath
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import redis
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response, status
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
 from app import cache
@@ -33,8 +33,8 @@ from app.deps import get_current_user, get_optional_identity
 from app.errors import APIError
 from app.models import User, Video, VideoStatus, Visibility
 from app.schemas import (
-    Creator, CreatorDetail, FeedItem, FeedResponse, MyVideosResponse,
-    ProgressResponse, UpdateVideoRequest, VideoDetail,
+    ChannelResponse, Creator, CreatorDetail, FeedItem, FeedResponse,
+    MyVideosResponse, ProgressResponse, UpdateVideoRequest, VideoDetail,
 )
 
 log = logging.getLogger(__name__)
@@ -43,6 +43,11 @@ router = APIRouter(prefix="/video", tags=["video"])
 
 PageParam = Annotated[int, Query(ge=1, le=100_000)]
 LimitParam = Annotated[int, Query(ge=1, le=50)]
+# latest: newest first. popular: most viewed first, newest breaking ties.
+SortParam = Literal["latest", "popular"]
+SearchParam = Annotated[str, Query(min_length=1, max_length=100)]
+
+_LISTED = (Video.visibility == Visibility.PUBLIC) & (Video.status == VideoStatus.COMPLETED)
 
 
 def _not_found() -> APIError:
@@ -93,17 +98,44 @@ def _publicly_viewable(video: Video) -> bool:
     return video.status == VideoStatus.COMPLETED and video.visibility != Visibility.PRIVATE
 
 
-def _page(db: Session, where: ColumnElement[bool], page: int, limit: int) -> tuple[int, list[Video]]:
+def _page(
+    db: Session, where: ColumnElement[bool], page: int, limit: int, sort: SortParam = "latest",
+) -> tuple[int, list[Video]]:
     total = db.scalar(select(func.count()).select_from(Video).where(where))
+    order = [Video.created_at.desc(), Video.id.desc()]
+    if sort == "popular":
+        order.insert(0, Video.views_count.desc())
     rows = db.scalars(
         select(Video)
         .options(joinedload(Video.user))
         .where(where)
-        .order_by(Video.created_at.desc(), Video.id.desc())
+        .order_by(*order)
         .offset((page - 1) * limit)
         .limit(limit)
     ).all()
     return total, list(rows)
+
+
+def _feed_page(db: Session, where: ColumnElement[bool], page: int, limit: int, sort: SortParam) -> FeedResponse:
+    total, rows = _page(db, where, page, limit, sort)
+    return FeedResponse(total=total, page=page, limit=limit, items=[_to_feed_item(v) for v in rows])
+
+
+def _matches(query: str) -> ColumnElement[bool]:
+    """Every word of `query` appears in the title or the description,
+    case-insensitively. LIKE wildcards in the query match literally."""
+    words = query.split()
+    if not words:
+        raise APIError(400, "empty_query", "Enter something to search for")
+    clauses = []
+    for word in words[:10]:
+        escaped = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        clauses.append(or_(
+            Video.title.ilike(pattern, escape="\\"),
+            Video.description.ilike(pattern, escape="\\"),
+        ))
+    return and_(*clauses)
 
 
 def _load(db: Session, video_id: UUID) -> Video | None:
@@ -190,11 +222,36 @@ def _delete_media(raw_key: str, thumbnail_key: str) -> None:
 # Static paths first: /{video_id} would otherwise capture "feed" and "mine".
 
 @router.get("/feed", response_model=FeedResponse)
-def get_feed(page: PageParam = 1, limit: LimitParam = 10, db: Session = Depends(get_db)):
-    where = (Video.visibility == Visibility.PUBLIC) & (Video.status == VideoStatus.COMPLETED)
-    total, rows = _page(db, where, page, limit)
-    return FeedResponse(
-        total=total, page=page, limit=limit, items=[_to_feed_item(v) for v in rows],
+def get_feed(
+    page: PageParam = 1, limit: LimitParam = 10, sort: SortParam = "latest",
+    db: Session = Depends(get_db),
+):
+    return _feed_page(db, _LISTED, page, limit, sort)
+
+
+@router.get("/search", response_model=FeedResponse)
+def search_videos(
+    q: SearchParam, page: PageParam = 1, limit: LimitParam = 10, sort: SortParam = "latest",
+    db: Session = Depends(get_db),
+):
+    """Listed videos whose title or description contains every word of `q`."""
+    return _feed_page(db, _LISTED & _matches(q), page, limit, sort)
+
+
+@router.get("/channel/{user_id}", response_model=ChannelResponse)
+def get_channel(
+    user_id: UUID, page: PageParam = 1, limit: LimitParam = 10, sort: SortParam = "latest",
+    db: Session = Depends(get_db),
+):
+    """A creator's profile and their listed videos. Private, unlisted, and
+    unfinished videos stay out, whoever asks; the owner sees those in /mine."""
+    user = db.get(User, user_id)
+    if user is None:
+        raise APIError(404, "channel_not_found", "Channel not found")
+    feed = _feed_page(db, _LISTED & (Video.user_id == user.id), page, limit, sort)
+    return ChannelResponse(
+        creator=CreatorDetail(id=user.id, name=user.name, created_at=user.created_at),
+        **feed.model_dump(),
     )
 
 
