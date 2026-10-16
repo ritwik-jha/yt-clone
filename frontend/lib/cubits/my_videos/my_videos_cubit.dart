@@ -33,7 +33,7 @@ class MyVideosCubit extends FeedCubit {
     _timer = null;
   }
 
-  /// Paused while the app is in the background.
+  /// Paused while the tab is hidden.
   void setPaused(bool paused) => _paused = paused;
 
   Future<void> poll() async {
@@ -61,15 +61,6 @@ class MyVideosCubit extends FeedCubit {
       }
     } finally {
       _polling = false;
-    }
-  }
-
-  void applyChange(VideoChange change) {
-    switch (change) {
-      case VideoUpdated(:final video):
-        replace(video);
-      case VideoDeleted(:final id):
-        remove(id);
     }
   }
 

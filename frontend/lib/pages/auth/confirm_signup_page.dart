@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../app/routes.dart';
 
 import '../../core/validators.dart';
 import '../../cubits/auth/auth_cubit.dart';
@@ -9,7 +12,6 @@ import '../../cubits/session/session_cubit.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/auth_scaffold.dart';
 import '../../widgets/resend_code_button.dart';
-import 'login_page.dart';
 
 class ConfirmSignUpPage extends StatefulWidget {
   const ConfirmSignUpPage({
@@ -17,6 +19,7 @@ class ConfirmSignUpPage extends StatefulWidget {
     required this.email,
     this.freshCode = false,
     this.sendCodeOnOpen = false,
+    this.next,
   });
 
   final String email;
@@ -27,31 +30,23 @@ class ConfirmSignUpPage extends StatefulWidget {
   /// Opened from Sign In / Sign Up for an unconfirmed account: send a new code.
   final bool sendCodeOnOpen;
 
+  /// Where to go after signing in.
+  final String? next;
+
   /// The page wrapped with its own [AuthCubit].
-  static Widget provided(
-    BuildContext ctx, {
+  static Widget provided({
     required String email,
     bool freshCode = false,
     bool sendCodeOnOpen = false,
+    String? next,
   }) => BlocProvider(
-    create: (_) => AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
+    create: (ctx) =>
+        AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
     child: ConfirmSignUpPage(
       email: email,
       freshCode: freshCode,
       sendCodeOnOpen: sendCodeOnOpen,
-    ),
-  );
-
-  static Route<void> route(
-    String email, {
-    bool freshCode = false,
-    bool sendCodeOnOpen = false,
-  }) => MaterialPageRoute(
-    builder: (ctx) => provided(
-      ctx,
-      email: email,
-      freshCode: freshCode,
-      sendCodeOnOpen: sendCodeOnOpen,
+      next: next,
     ),
   );
 
@@ -96,7 +91,7 @@ class _ConfirmSignUpPageState extends State<ConfirmSignUpPage> {
       switch (state) {
         case AuthConfirmSignUpSuccess(:final email):
           showSnack(context, 'User confirmed successfully');
-          Navigator.of(context).pushReplacement(LoginPage.route(email: email));
+          context.go(Routes.signInPage(email: email, next: widget.next));
         case AuthCodeSent(:final message):
           showSnack(context, message);
           _resendKey.currentState?.startCooldown();
@@ -104,8 +99,12 @@ class _ConfirmSignUpPageState extends State<ConfirmSignUpPage> {
           if (code == 'code_expired') _resendKey.currentState?.clearCooldown();
           if (code == 'not_authorized') {
             showSnack(context, 'This account is already verified');
-            Navigator.of(context)
-                .pushReplacement(LoginPage.route(email: emailController.text));
+            context.go(
+              Routes.signInPage(
+                email: emailController.text.trim(),
+                next: widget.next,
+              ),
+            );
           } else if (const {
             'code_delivery_failed',
             'too_many_attempts',
@@ -126,7 +125,6 @@ class _ConfirmSignUpPageState extends State<ConfirmSignUpPage> {
       return AuthScaffold(
         title: 'Confirm Sign Up',
         subtitle: 'Enter the 6-digit code we emailed you',
-        showBack: true,
         children: [
           Form(
             key: _formKey,
@@ -179,8 +177,12 @@ class _ConfirmSignUpPageState extends State<ConfirmSignUpPage> {
           ),
           const SizedBox(height: 8),
           TextButton(
-            onPressed: () => Navigator.of(context)
-                .pushReplacement(LoginPage.route(email: emailController.text)),
+            onPressed: () => context.go(
+              Routes.signInPage(
+                email: emailController.text.trim(),
+                next: widget.next,
+              ),
+            ),
             child: const Text('Back to sign in'),
           ),
         ],

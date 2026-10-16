@@ -3,10 +3,9 @@
     "short_name": "Video Stream",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0F0F0F",
-    "theme_color": "#0F0F0F",
-    "description": "Watch and upload videos.",
-    "orientation": "portrait-primary",
+    "background_color": "#000000",
+    "theme_color": "#212121",
+    "description": "Browse, watch, and upload videos.",
     "prefer_related_applications": false,
     "icons": [
         {

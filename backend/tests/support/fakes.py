@@ -6,9 +6,11 @@ the app makes and fail the way the real services do (botocore ClientError
 codes), so the routers' error mapping is exercised too.
 """
 
+import os
 import secrets
 import threading
 import uuid
+from urllib.parse import urlencode
 
 import fakeredis
 from botocore.exceptions import ClientError
@@ -141,13 +143,23 @@ class _Paginator:
 
 
 class FakeS3:
-    """Presigns URLs nobody serves; deletes always succeed."""
+    """Presigned PUTs go to the test server's in-memory bucket store
+    (server.py, under FAKE_S3_URL) when that is set, else to a host nobody
+    serves. Deletes always succeed."""
 
     def __init__(self) -> None:
         self.deleted: list[tuple[str, str]] = []
 
     def generate_presigned_url(self, *, Params, ExpiresIn, **_):
-        return f"https://{Params['Bucket']}.s3.test/{Params['Key']}?X-Amz-Expires={ExpiresIn}"
+        base = os.environ.get("FAKE_S3_URL", "").rstrip("/")
+        query = urlencode({
+            "X-Amz-Expires": ExpiresIn,
+            # Real S3 signs the Content-Type, and rejects a PUT with another one.
+            "X-Amz-Content-Type": Params.get("ContentType", ""),
+        })
+        if base:
+            return f"{base}/{Params['Bucket']}/{Params['Key']}?{query}"
+        return f"https://{Params['Bucket']}.s3.test/{Params['Key']}?{query}"
 
     def delete_object(self, *, Bucket, Key):
         self.deleted.append((Bucket, Key))

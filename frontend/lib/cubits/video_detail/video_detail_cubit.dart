@@ -35,8 +35,11 @@ class VideoDetailCubit extends Cubit<VideoDetailState> {
     _timer?.cancel();
     emit(VideoDetailLoading(video ?? _initial));
     try {
-      _apply(await _videos.detail(id));
+      final video = await _videos.detail(id);
+      if (isClosed) return;
+      _apply(video);
     } on ApiException catch (e) {
+      if (isClosed) return;
       if (e.code == 'video_not_found') {
         emit(const VideoDetailNotFound());
       } else {
@@ -66,7 +69,9 @@ class VideoDetailCubit extends Cubit<VideoDetailState> {
       if (isClosed) return;
       if (p.status.isTerminal) {
         _timer?.cancel();
-        _apply(await _videos.detail(id));
+        final video = await _videos.detail(id);
+        if (isClosed) return;
+        _apply(video);
       } else if (state is VideoDetailProcessing) {
         emit(
           VideoDetailProcessing(

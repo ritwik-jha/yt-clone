@@ -1,22 +1,66 @@
 import 'package:dio/dio.dart';
 
 import '../core/api_exception.dart';
+import '../models/channel.dart';
 import '../models/page_result.dart';
 import '../models/progress.dart';
 import '../models/video.dart';
+
+/// Order for the feed, search, and channel lists.
+enum VideoSort {
+  latest,
+  popular;
+
+  String get wire => name;
+}
 
 class VideoService {
   VideoService(this._api);
   final Dio _api;
 
-  Future<PageResult<Video>> feed({int page = 1, int limit = 10}) =>
-      guardApi(() async {
-        final res = await _api.get<Map<String, dynamic>>(
-          '/video/feed',
-          queryParameters: {'page': page, 'limit': limit},
-        );
-        return PageResult.fromJson(res.data!, Video.fromJson);
-      });
+  Future<PageResult<Video>> feed({
+    int page = 1,
+    int limit = 10,
+    VideoSort sort = VideoSort.latest,
+  }) => guardApi(() async {
+    final res = await _api.get<Map<String, dynamic>>(
+      '/video/feed',
+      queryParameters: {'page': page, 'limit': limit, 'sort': sort.wire},
+    );
+    return PageResult.fromJson(res.data!, Video.fromJson);
+  });
+
+  /// Listed videos whose title or description has every word of [query].
+  Future<PageResult<Video>> search(
+    String query, {
+    int page = 1,
+    int limit = 10,
+    VideoSort sort = VideoSort.latest,
+  }) => guardApi(() async {
+    final res = await _api.get<Map<String, dynamic>>(
+      '/video/search',
+      queryParameters: {
+        'q': query,
+        'page': page,
+        'limit': limit,
+        'sort': sort.wire,
+      },
+    );
+    return PageResult.fromJson(res.data!, Video.fromJson);
+  });
+
+  Future<ChannelListing> channel(
+    String userId, {
+    int page = 1,
+    int limit = 10,
+    VideoSort sort = VideoSort.latest,
+  }) => guardApi(() async {
+    final res = await _api.get<Map<String, dynamic>>(
+      '/video/channel/$userId',
+      queryParameters: {'page': page, 'limit': limit, 'sort': sort.wire},
+    );
+    return ChannelListing.fromJson(res.data!);
+  });
 
   Future<PageResult<Video>> mine({int page = 1, int limit = 10}) =>
       guardApi(() async {

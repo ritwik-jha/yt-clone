@@ -1,27 +1,26 @@
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 
-import 'token_store.dart';
-
-/// Adds the Bearer header and performs a single-flight refresh on 401
-/// (plan §5.4). Retries go through the `bare` client to avoid deadlocking
-/// the queue.
+/// Refreshes the session once on a 401 and retries the request (plan §5.4).
+///
+/// The refresh cookie is HttpOnly and scoped to `/auth`, so the browser sends
+/// it to `/auth/refresh` itself. Requests that fail together queue behind one
+/// refresh: a request sent before the last successful refresh is retried
+/// without refreshing again. Retries go through the `bare` client so they
+/// don't deadlock the queue.
 class AuthInterceptor extends QueuedInterceptor {
   AuthInterceptor(
-    this._tokens,
     this._bare,
     this._onSessionExpired, {
-    this.browserCookies = kIsWeb,
-  });
+    DateTime Function()? clock,
+  }) : _now = clock ?? DateTime.now;
 
-  final TokenStore _tokens;
   final Dio _bare;
   final void Function() _onSessionExpired;
+  final DateTime Function() _now;
+  DateTime? _refreshedAt;
 
-  /// On the web the tokens live in HttpOnly cookies the browser manages, so
-  /// the [TokenStore] stays empty and the refresh cookie is sent by the
-  /// browser rather than by us.
-  final bool browserCookies;
+  static const _sentAt = 'sentAt';
+  static const _retried = 'retried';
 
   static const skipPaths = {
     '/auth/signup',
@@ -35,12 +34,8 @@ class AuthInterceptor extends QueuedInterceptor {
   };
 
   @override
-  Future<void> onRequest(
-    RequestOptions options,
-    RequestInterceptorHandler handler,
-  ) async {
-    final token = await _tokens.accessToken();
-    if (token != null) options.headers['Authorization'] = 'Bearer $token';
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    options.extra[_sentAt] = _now();
     handler.next(options);
   }
 
@@ -52,16 +47,17 @@ class AuthInterceptor extends QueuedInterceptor {
     final request = err.requestOptions;
     if (err.response?.statusCode != 401 ||
         skipPaths.contains(request.path) ||
-        request.extra['retried'] == true) {
+        request.extra[_retried] == true) {
       return handler.next(err);
     }
 
-    final current = await _tokens.accessToken();
-    final alreadyRefreshed =
-        current != null &&
-        request.headers['Authorization'] != 'Bearer $current';
+    final sentAt = request.extra[_sentAt] as DateTime?;
+    final refreshedSince =
+        _refreshedAt != null &&
+        sentAt != null &&
+        sentAt.isBefore(_refreshedAt!);
 
-    if (!alreadyRefreshed) {
+    if (!refreshedSince) {
       bool ok;
       try {
         ok = await _refresh();
@@ -70,15 +66,12 @@ class AuthInterceptor extends QueuedInterceptor {
         return handler.next(e);
       }
       if (!ok) {
-        await _tokens.clear();
         _onSessionExpired();
         return handler.next(err);
       }
     }
 
-    final token = await _tokens.accessToken();
-    if (token != null) request.headers['Authorization'] = 'Bearer $token';
-    request.extra['retried'] = true;
+    request.extra[_retried] = true;
     try {
       handler.resolve(await _bare.fetch<dynamic>(request));
     } on DioException catch (e) {
@@ -87,16 +80,10 @@ class AuthInterceptor extends QueuedInterceptor {
   }
 
   Future<bool> _refresh() async {
-    final refresh = await _tokens.refreshToken();
-    if (refresh == null && !browserCookies) return false;
     try {
-      await _bare.post<dynamic>(
-        '/auth/refresh',
-        options: refresh == null
-            ? null
-            : Options(headers: {'Cookie': 'refresh_token=$refresh'}),
-      );
-      return true; // CookieCapture stored the new access token
+      await _bare.post<dynamic>('/auth/refresh');
+      _refreshedAt = _now();
+      return true;
     } on DioException catch (e) {
       if (e.response?.statusCode == 401) return false;
       rethrow;

@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../app/routes.dart';
 
 import '../../core/theme.dart';
 import '../../core/validators.dart';
@@ -10,20 +13,17 @@ import '../../cubits/session/session_cubit.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/auth_scaffold.dart';
 import '../../widgets/resend_code_button.dart';
-import 'forgot_password_page.dart';
-import 'login_page.dart';
 
 class ResetPasswordPage extends StatefulWidget {
   const ResetPasswordPage({super.key, required this.email});
 
   final String email;
 
-  static Route<void> route(String email) => MaterialPageRoute(
-    builder: (ctx) => BlocProvider(
-      create: (_) =>
-          AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
-      child: ResetPasswordPage(email: email),
-    ),
+  /// The page wrapped with its own [AuthCubit].
+  static Widget provided({required String email}) => BlocProvider(
+    create: (ctx) =>
+        AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
+    child: ResetPasswordPage(email: email),
   );
 
   @override
@@ -58,9 +58,7 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
       switch (state) {
         case AuthPasswordResetSuccess(:final email, :final message):
           showSnack(context, message);
-          Navigator.of(
-            context,
-          ).pushAndRemoveUntil(LoginPage.route(email: email), (r) => r.isFirst);
+          context.go(Routes.signInPage(email: email));
         case AuthCodeSent(:final message):
           showSnack(context, message);
           _resendKey.currentState?.startCooldown();
@@ -83,7 +81,6 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
       return AuthScaffold(
         title: 'Reset password',
         subtitle: 'Enter the code we emailed you and a new password',
-        showBack: true,
         children: [
           Row(
             children: [
@@ -94,9 +91,8 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
                 ),
               ),
               TextButton(
-                onPressed: () => Navigator.of(context).pushReplacement(
-                  ForgotPasswordPage.route(email: widget.email),
-                ),
+                onPressed: () =>
+                    context.go(Routes.forgotPasswordPage(email: widget.email)),
                 child: const Text('Change'),
               ),
             ],

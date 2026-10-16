@@ -1,6 +1,8 @@
-"""FastAPI dependencies — resolve the caller from the access cookie (or a
-Bearer header fallback) by calling Cognito's GetUser, and map them to their
-users row.
+"""FastAPI dependencies — resolve the caller from the access cookie by
+calling Cognito's GetUser, and map them to their users row.
+
+The web app is the only client, and the browser sends the HttpOnly cookie
+itself, so there is no Authorization header path.
 
 GetUser rejects expired and revoked tokens, so a logout (RevokeToken) takes
 effect on the next request without a local token blacklist.
@@ -42,13 +44,7 @@ def _idp_unavailable() -> APIError:
 
 
 def _extract_token(request: Request) -> Optional[str]:
-    token = request.cookies.get(ACCESS_COOKIE)
-    if token:
-        return token
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth.split(" ", 1)[1].strip() or None
-    return None
+    return request.cookies.get(ACCESS_COOKIE) or None
 
 
 def _identity_from_token(token: str) -> Identity:

@@ -13,7 +13,13 @@ def test_login_sets_http_only_cookies(anon):
     assert r.status_code == 200
     cookies = r.headers.get_list("set-cookie")
     assert any(c.startswith("access_token=") and "HttpOnly" in c and "Path=/" in c for c in cookies)
-    assert any(c.startswith("refresh_token=") and "Path=/auth/refresh" in c for c in cookies)
+    # /auth covers /auth/refresh and /auth/logout, so the browser can revoke it.
+    assert any(c.startswith("refresh_token=") and "HttpOnly" in c and "Path=/auth;" in c for c in cookies)
+    # A refresh cookie left at the old path is expired.
+    assert any(
+        c.startswith("refresh_token=") and "Path=/auth/refresh" in c and "Max-Age=0" in c
+        for c in cookies
+    )
 
 
 def test_login_failures(anon):
@@ -27,7 +33,7 @@ def test_login_failures(anon):
 
 def test_me_requires_a_valid_token(anon, alice):
     assert anon.get("/auth/me").json()["code"] == "missing_access_token"
-    r = anon.get("/auth/me", headers={"Authorization": "Bearer nope"})
+    r = anon.get("/auth/me", headers={"Cookie": "access_token=nope"})
     assert (r.status_code, r.json()["code"]) == (401, "token_invalid")
     me = alice.get("/auth/me").json()
     assert me == {**me, "id": str(seed_data.ALICE.id), "email": seed_data.ALICE.email,
@@ -39,15 +45,25 @@ def test_refresh_then_logout_revokes(live_url):
     refresh = client.refresh_token
     with httpx.Client(base_url=live_url) as raw:
         assert raw.post("/auth/refresh").json()["code"] == "missing_refresh_token"
-        r = raw.post("/auth/refresh", headers={"Cookie": f"refresh_token={refresh}"})
-        assert r.status_code == 200
-        new_access = r.cookies["access_token"]
-        assert raw.get("/auth/me", headers={"Authorization": f"Bearer {new_access}"}).status_code == 200
 
-        r = raw.post("/auth/logout", headers={"Cookie": f"refresh_token={refresh}"})
-        assert r.status_code == 200
-        assert any(c.startswith('access_token=""') or "Max-Age=0" in c for c in r.headers.get_list("set-cookie"))
-        r = raw.get("/auth/me", headers={"Authorization": f"Bearer {new_access}"})
+    # The browser flow: the client's cookie jar sends the refresh cookie to
+    # /auth/refresh and /auth/logout, and the access cookie everywhere.
+    r = client.post("/auth/refresh")
+    assert r.status_code == 200
+    new_access = r.cookies["access_token"]
+    assert client.get("/auth/me").status_code == 200
+
+    r = client.post("/auth/logout")
+    assert r.status_code == 200
+    cleared = r.headers.get_list("set-cookie")
+    assert any(c.startswith("access_token=") and "Max-Age=0" in c for c in cleared)
+    assert any(c.startswith("refresh_token=") and "Path=/auth;" in c and "Max-Age=0" in c for c in cleared)
+    assert not client.cookies.get("access_token")
+    client.close()
+
+    with httpx.Client(base_url=live_url) as raw:
+        # Logout revoked the refresh token and every access token from it.
+        r = raw.get("/auth/me", headers={"Cookie": f"access_token={new_access}"})
         assert (r.status_code, r.json()["code"]) == (401, "token_invalid")
         r = raw.post("/auth/refresh", headers={"Cookie": f"refresh_token={refresh}"})
         assert (r.status_code, r.json()["code"]) == (401, "refresh_token_invalid")

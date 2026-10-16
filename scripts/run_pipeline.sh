@@ -92,6 +92,7 @@ fresh_backend() {
     set -a; . tests/support/test.env; set +a
     export DATABASE_URL="sqlite:///$DB"
     export CORS_ORIGINS="http://127.0.0.1:$WEB_PORT"
+    export FAKE_S3_URL="$API_URL/_s3"
     exec "$PYTHON" -m uvicorn tests.support.server:app --host 127.0.0.1 --port "$API_PORT"
   ) >>"$LOGS/backend.log" 2>&1 &
   BACKEND_PID=$!
@@ -151,11 +152,11 @@ step4() {
   (
     cd "$FRONTEND"
     # --no-web-resources-cdn: serve CanvasKit from the app instead of
-    # www.gstatic.com, so the run needs no internet. The tall window builds
-    # every seeded card without drag-scrolling.
+    # www.gstatic.com, so the run needs no internet. A desktop-sized window
+    # (the full guide) tall enough to build every seeded card.
     CHROME_EXECUTABLE="$chrome" "$FLUTTER" drive \
       -d web-server --headless --no-web-resources-cdn \
-      --browser-dimension=420x3000 \
+      --browser-dimension=1440x2000 \
       --web-hostname=127.0.0.1 --web-port="$WEB_PORT" \
       --browser-name=chrome --chrome-binary="$chrome" --driver-port="$DRIVER_PORT" \
       --driver=test_driver/integration_test.dart \

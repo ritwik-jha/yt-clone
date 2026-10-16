@@ -1,16 +1,15 @@
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 
 import '../core/api_exception.dart';
-import '../core/token_store.dart';
 import '../models/user_profile.dart';
 
+/// Auth calls. The session is a pair of HttpOnly cookies the browser keeps;
+/// this class never sees a token.
 class AuthService {
-  AuthService({required this._api, required this._bare, required this._tokens});
+  AuthService({required this._api, required this._bare});
 
   final Dio _api;
   final Dio _bare;
-  final TokenStore _tokens;
 
   Future<String> _post(String path, Map<String, dynamic> body) =>
       guardApi(() async {
@@ -44,18 +43,12 @@ class AuthService {
         'new_password': newPassword,
       });
 
-  /// Logs in (CookieCapture stores the tokens) and loads the profile.
+  /// Logs in (the browser stores the cookies) and loads the profile.
   Future<UserProfile> login(String email, String password) async {
     await _post('/auth/login', {
       'email': email.trim().toLowerCase(),
       'password': password,
     });
-    if (!kIsWeb && await _tokens.accessToken() == null) {
-      throw const ApiException(
-        kind: ApiErrorKind.server,
-        message: 'Sign-in failed. Please try again.',
-      );
-    }
     return me();
   }
 
@@ -64,19 +57,18 @@ class AuthService {
     return UserProfile.fromJson(res.data!);
   });
 
-  /// Best effort: the local session is cleared whatever this returns.
+  /// Renews the access cookie before it expires. Throws [ApiException];
+  /// `unauthorized` means the session is over.
+  Future<void> refresh() =>
+      guardApi(() => _bare.post<dynamic>('/auth/refresh'));
+
+  /// Revokes the refresh token and clears the cookies. Best effort: the app
+  /// signs out locally whatever this returns.
   Future<void> logout() async {
-    final refresh = await _tokens.refreshToken();
     try {
-      await _bare.post<dynamic>(
-        '/auth/logout',
-        options: refresh == null
-            ? null
-            : Options(headers: {'Cookie': 'refresh_token=$refresh'}),
-      );
+      await _bare.post<dynamic>('/auth/logout');
     } on DioException {
       // ignored
     }
-    await _tokens.clear();
   }
 }

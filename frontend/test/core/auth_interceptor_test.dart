@@ -1,161 +1,139 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http_mock_adapter/http_mock_adapter.dart';
+import 'package:ytp_app/core/api_client.dart';
 import 'package:ytp_app/core/auth_interceptor.dart';
-import 'package:ytp_app/core/cookie_capture.dart';
-import 'package:ytp_app/core/token_store.dart';
+
+/// Answers each request with [handler]; records what was sent.
+class _Server implements HttpClientAdapter {
+  _Server(this.handler);
+
+  final Future<(int, Map<String, dynamic>)> Function(RequestOptions) handler;
+  final requests = <RequestOptions>[];
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    requests.add(options);
+    final (status, body) = await handler(options);
+    return ResponseBody.fromString(
+      jsonEncode(body),
+      status,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+
+  int count(String path) => requests.where((r) => r.path == path).length;
+
+  @override
+  void close({bool force = false}) {}
+}
 
 void main() {
-  late TokenStore tokens;
+  late int expired;
   late Dio api;
   late Dio bare;
-  late DioAdapter apiAdapter;
-  late DioAdapter bareAdapter;
-  late int expired;
-  late List<String?> refreshCookies;
 
-  setUp(() async {
+  /// The session: `fresh` once a refresh succeeded.
+  late bool fresh;
+  late bool refreshWorks;
+
+  Future<(int, Map<String, dynamic>)> backend(RequestOptions o) async {
+    switch (o.path) {
+      case '/auth/refresh':
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        if (!refreshWorks) {
+          return (401, {'code': 'refresh_token_invalid', 'detail': 'x'});
+        }
+        fresh = true;
+        return (200, {'message': 'Session refreshed'});
+      case '/video/mine' || '/auth/me':
+        return fresh
+            ? (200, {'ok': o.path})
+            : (401, {'code': 'token_invalid', 'detail': 'x'});
+      case '/auth/login':
+        return (400, {'code': 'incorrect_credentials', 'detail': 'x'});
+      default:
+        return (404, {'code': 'not_found', 'detail': 'x'});
+    }
+  }
+
+  setUp(() {
     expired = 0;
-    refreshCookies = [];
-    tokens = TokenStore(MemoryKv());
-    await tokens.save(accessTokenKey, 'old', maxAgeSeconds: 3600);
-    await tokens.save(refreshTokenKey, 'refresh', maxAgeSeconds: 432000);
-    bare = Dio(BaseOptions(baseUrl: 'http://x'))
-      ..interceptors.addAll([
-        InterceptorsWrapper(
-          onRequest: (o, h) {
-            if (o.path == '/auth/refresh') {
-              refreshCookies.add(o.headers['Cookie'] as String?);
-            }
-            h.next(o);
-          },
-        ),
-        CookieCapture(tokens),
-      ]);
-    api = Dio(BaseOptions(baseUrl: 'http://x'))
-      ..interceptors.add(AuthInterceptor(tokens, bare, () => expired++));
-    apiAdapter = DioAdapter(dio: api);
-    bareAdapter = DioAdapter(dio: bare);
+    fresh = false;
+    refreshWorks = true;
+    final server = _Server(backend);
+    bare = Dio(BaseOptions(baseUrl: 'http://api'))..httpClientAdapter = server;
+    api = Dio(BaseOptions(baseUrl: 'http://api'))
+      ..httpClientAdapter = server
+      ..interceptors.add(AuthInterceptor(bare, () => expired++));
   });
 
-  test('401 triggers one refresh, then the retry succeeds', () async {
-    apiAdapter.onGet(
-      '/auth/me',
-      (s) => s.reply(401, <String, dynamic>{
-        'code': 'token_invalid',
-        'detail': 'x',
-      }),
-    );
-    bareAdapter.onPost(
-      '/auth/refresh',
-      (s) => s.reply(
-        200,
-        <String, dynamic>{'message': 'ok'},
-        headers: {
-          'content-type': ['application/json'],
-          'set-cookie': ['access_token=new; Max-Age=3600; Path=/'],
-        },
-      ),
-    );
-    bareAdapter.onGet(
-      '/auth/me',
-      (s) => s.reply(200, <String, dynamic>{'id': 'u'}),
-    );
+  _Server server() => api.httpClientAdapter as _Server;
 
+  test('a 401 refreshes once and the retry succeeds', () async {
     final res = await api.get<Map<String, dynamic>>('/auth/me');
-    expect(res.data!['id'], 'u');
-    expect(await tokens.accessToken(), 'new');
-    expect(refreshCookies, ['refresh_token=refresh']);
+    expect(res.data, {'ok': '/auth/me'});
+    expect(server().count('/auth/refresh'), 1);
+    expect(server().count('/auth/me'), 2);
     expect(expired, 0);
   });
 
-  test('refresh 401 clears tokens and expires the session once', () async {
-    apiAdapter.onGet(
+  test('requests that fail together share one refresh', () async {
+    final results = await Future.wait([
+      api.get<Map<String, dynamic>>('/auth/me'),
+      api.get<Map<String, dynamic>>('/video/mine'),
+      api.get<Map<String, dynamic>>('/video/mine'),
+    ]);
+    expect(results.map((r) => r.data!['ok']), [
+      '/auth/me',
       '/video/mine',
-      (s) => s.reply(401, {'code': 'token_invalid'}),
-    );
-    bareAdapter.onPost(
-      '/auth/refresh',
-      (s) => s.reply(401, {'code': 'refresh_token_invalid', 'detail': 'x'}),
-    );
-
-    await expectLater(
-      api.get<dynamic>('/video/mine'),
-      throwsA(isA<DioException>()),
-    );
-    expect(expired, 1);
-    expect(await tokens.accessToken(), isNull);
-    expect(await tokens.refreshToken(), isNull);
+      '/video/mine',
+    ]);
+    expect(server().count('/auth/refresh'), 1);
   });
 
-  test('refresh network/5xx keeps the session', () async {
-    apiAdapter.onGet(
-      '/video/mine',
-      (s) => s.reply(401, {'code': 'token_invalid'}),
-    );
-    bareAdapter.onPost(
-      '/auth/refresh',
-      (s) => s.reply(503, {'code': 'identity_provider_unavailable'}),
-    );
+  test('a rejected refresh expires the session and surfaces the 401', () async {
+    refreshWorks = false;
     await expectLater(
       api.get<dynamic>('/video/mine'),
       throwsA(
         isA<DioException>().having(
           (e) => e.response?.statusCode,
           'status',
-          503,
+          401,
         ),
       ),
     );
-    expect(expired, 0);
-    expect(await tokens.refreshToken(), 'refresh');
+    expect(expired, 1);
+    expect(server().count('/video/mine'), 1);
   });
 
-  test('skip-listed routes never trigger a refresh', () async {
-    apiAdapter.onPost('/auth/login', (s) => s.reply(401, {'code': 'x'}));
+  test('auth endpoints are never refreshed or retried', () async {
     await expectLater(
       api.post<dynamic>('/auth/login'),
       throwsA(isA<DioException>()),
     );
-    expect(expired, 0);
-    expect(await tokens.accessToken(), 'old');
+    expect(server().count('/auth/refresh'), 0);
+    expect(AuthInterceptor.skipPaths, contains('/auth/refresh'));
   });
 
-  test('a non-401 error passes through untouched', () async {
-    apiAdapter.onGet(
-      '/video/feed',
-      (s) => s.reply(503, {'code': 'database_unavailable'}),
-    );
-    await expectLater(
-      api.get<dynamic>('/video/feed'),
-      throwsA(isA<DioException>()),
-    );
-    expect(expired, 0);
+  test('non-401 errors pass straight through', () async {
+    await expectLater(api.get<dynamic>('/nope'), throwsA(isA<DioException>()));
+    expect(server().count('/auth/refresh'), 0);
   });
 
-  test('web: refresh relies on the browser cookie, no Bearer null', () async {
-    await tokens.clear();
-    final headers = <String?>[];
-    final webApi = Dio(BaseOptions(baseUrl: 'http://x'))
-      ..interceptors.addAll([
-        AuthInterceptor(tokens, bare, () => expired++, browserCookies: true),
-        InterceptorsWrapper(
-          onRequest: (o, h) {
-            headers.add(o.headers['Authorization'] as String?);
-            h.next(o);
-          },
-        ),
-      ]);
-    DioAdapter(dio: webApi)
-        .onGet('/video/mine', (s) => s.reply(401, {'code': 'token_invalid'}));
-    bareAdapter
-      ..onPost('/auth/refresh', (s) => s.reply(200, {'message': 'ok'}))
-      ..onGet('/video/mine', (s) => s.reply(200, {'items': <dynamic>[]}));
-
-    final res = await webApi.get<Map<String, dynamic>>('/video/mine');
-    expect(res.data!['items'], isEmpty);
-    expect(headers, [null]);
-    expect(refreshCookies, [null]);
-    expect(expired, 0);
+  test('ApiClient sends credentials (the auth cookies) on every call', () {
+    final client = ApiClient(baseUrl: 'http://api', onSessionExpired: () {});
+    expect(client.api.options.extra['withCredentials'], isTrue);
+    expect(client.bare.options.extra['withCredentials'], isTrue);
+    expect(client.api.options.baseUrl, 'http://api');
   });
 }

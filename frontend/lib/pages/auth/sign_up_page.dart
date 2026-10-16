@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../app/routes.dart';
 
 import '../../core/validators.dart';
 import '../../cubits/auth/auth_cubit.dart';
@@ -7,19 +10,19 @@ import '../../cubits/auth/auth_state.dart';
 import '../../cubits/session/session_cubit.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/auth_scaffold.dart';
-import 'confirm_signup_page.dart';
-import 'login_page.dart';
 
 class SignUpPage extends StatefulWidget {
-  const SignUpPage({super.key});
+  const SignUpPage({super.key, this.next});
+
+  /// Where to go once signed in.
+  final String? next;
 
   /// The page wrapped with its own [AuthCubit].
-  static Widget provided(BuildContext ctx) => BlocProvider(
-    create: (_) => AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
-    child: const SignUpPage(),
+  static Widget provided({String? next}) => BlocProvider(
+    create: (ctx) =>
+        AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
+    child: SignUpPage(next: next),
   );
-
-  static Route<void> route() => MaterialPageRoute(builder: provided);
 
   @override
   State<SignUpPage> createState() => _SignUpPageState();
@@ -57,8 +60,9 @@ class _SignUpPageState extends State<SignUpPage> {
             context,
             codeSent ? 'Check your email for the verification code' : "Account created, but we couldn't send the email. Tap Resend.",
           );
-          Navigator.of(context)
-              .push(ConfirmSignUpPage.route(email, freshCode: codeSent));
+          context.go(
+            Routes.verifyPage(email, sent: codeSent, next: widget.next),
+          );
         case AuthError(:final code, :final message, :final fieldErrors):
           if (fieldErrors.isEmpty &&
               code != 'email_exists' &&
@@ -111,16 +115,20 @@ class _SignUpPageState extends State<SignUpPage> {
                       spacing: 8,
                       children: [
                         TextButton(
-                          onPressed: () => Navigator.of(
-                            context,
-                          ).push(LoginPage.route(email: emailController.text)),
+                          onPressed: () => context.go(
+                            Routes.signInPage(
+                              email: emailController.text.trim(),
+                              next: widget.next,
+                            ),
+                          ),
                           child: const Text('Sign in'),
                         ),
                         TextButton(
-                          onPressed: () => Navigator.of(context).push(
-                            ConfirmSignUpPage.route(
+                          onPressed: () => context.go(
+                            Routes.verifyPage(
                               emailController.text.trim().toLowerCase(),
-                              sendCodeOnOpen: true,
+                              resend: true,
+                              next: widget.next,
                             ),
                           ),
                           child: const Text('Verify this email'),
@@ -154,7 +162,8 @@ class _SignUpPageState extends State<SignUpPage> {
             children: [
               const Text('Already have an account?'),
               TextButton(
-                onPressed: () => Navigator.of(context).push(LoginPage.route()),
+                onPressed: () =>
+                    context.go(Routes.signInPage(next: widget.next)),
                 child: const Text('Sign In'),
               ),
             ],

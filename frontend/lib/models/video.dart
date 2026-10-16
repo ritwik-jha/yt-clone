@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
-import 'package:flutter/foundation.dart';
+
+import '../platform/video_player.dart';
 
 enum VideoStatus {
   pending,
@@ -43,6 +44,9 @@ enum VideoVisibility {
   };
 
   String get wire => name.toUpperCase();
+
+  /// What an owner can pick, in menu order.
+  static const choices = [public, unlisted, private];
 
   String get label => switch (this) {
     public => 'Public',
@@ -106,12 +110,15 @@ class Video extends Equatable {
   VideoVisibility get effectiveVisibility =>
       visibility ?? VideoVisibility.public;
 
-  /// DASH on Android, HLS on iOS (plan D10).
-  String? playbackUrlFor(TargetPlatform platform) =>
-      platform == TargetPlatform.iOS ? hlsUrl : manifestUrl;
+  /// HLS when the pipeline wrote it, else DASH (videos transcoded before
+  /// HLS output existed). Null until the video is ready.
+  PlaybackSource? get playbackSource => switch ((hlsUrl, manifestUrl)) {
+    (final hls?, _) => PlaybackSource(hls, StreamKind.hls),
+    (null, final dash?) => PlaybackSource(dash, StreamKind.dash),
+    _ => null,
+  };
 
-  String? get playbackUrl => playbackUrlFor(defaultTargetPlatform);
-  bool get isPlayable => playbackUrl != null;
+  bool get isPlayable => playbackSource != null;
 
   factory Video.fromJson(Map<String, dynamic> j) => Video(
     id: j['id'] as String,
@@ -188,19 +195,4 @@ class VideoUpdate {
     if (description != null) 'description': description,
     if (visibility != null) 'visibility': visibility!.wire,
   };
-}
-
-/// What the player page hands back to the page that opened it (plan §5.6).
-sealed class VideoChange {
-  const VideoChange();
-}
-
-class VideoUpdated extends VideoChange {
-  const VideoUpdated(this.video);
-  final Video video;
-}
-
-class VideoDeleted extends VideoChange {
-  const VideoDeleted(this.id);
-  final String id;
 }

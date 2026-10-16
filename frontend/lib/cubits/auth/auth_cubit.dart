@@ -94,7 +94,7 @@ class AuthCubit extends Cubit<AuthState> {
     try {
       final user = await _auth.login(email, password);
       emit(AuthLoginSuccess(user));
-      await _session.signedIn(user);
+      _session.signedIn(user);
     } on ApiException catch (e) {
       final normalized = email.trim().toLowerCase();
       switch (e.code) {

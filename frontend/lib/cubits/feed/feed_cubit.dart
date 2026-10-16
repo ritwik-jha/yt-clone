@@ -8,13 +8,28 @@ import 'feed_state.dart';
 
 typedef PageFetcher = Future<PageResult<Video>> Function(int page, int limit);
 
-/// Paginated list used by Home (public feed); My Videos extends it.
+/// A paginated video list: the home feed, search results, a channel's
+/// uploads, and (through [MyVideosCubit]) the owner's videos.
 class FeedCubit extends Cubit<VideoListState> {
-  FeedCubit(VideoService videos, {this.limit = 10})
-    : _fetch = ((page, limit) => videos.feed(page: page, limit: limit)),
-      super(const VideoListState());
+  FeedCubit(
+    VideoService videos, {
+    VideoSort sort = VideoSort.latest,
+    this.limit = 24,
+  }) : _fetch = ((page, limit) =>
+           videos.feed(page: page, limit: limit, sort: sort)),
+       super(const VideoListState());
 
-  FeedCubit.withFetcher(this._fetch, {this.limit = 10})
+  /// Search results for [query].
+  FeedCubit.search(
+    VideoService videos,
+    String query, {
+    VideoSort sort = VideoSort.latest,
+    this.limit = 20,
+  }) : _fetch = ((page, limit) =>
+           videos.search(query, page: page, limit: limit, sort: sort)),
+       super(const VideoListState());
+
+  FeedCubit.withFetcher(this._fetch, {this.limit = 24})
     : super(const VideoListState());
 
   final PageFetcher _fetch;
@@ -42,6 +57,8 @@ class FeedCubit extends Cubit<VideoListState> {
   Future<void> _run({required int page, required bool replace}) async {
     try {
       final result = await _fetch(page, limit);
+      // The page went away (navigation, another chip) while this loaded.
+      if (isClosed) return;
       // Offset pagination shifts as videos complete: de-duplicate by id.
       final seen = <String>{if (!replace) ...state.items.map((v) => v.id)};
       final merged = [
@@ -59,6 +76,7 @@ class FeedCubit extends Cubit<VideoListState> {
         ),
       );
     } on ApiException catch (e) {
+      if (isClosed) return;
       // A failed pull-to-refresh or load-more keeps what's already on screen.
       emit(
         state.copyWith(

@@ -3,54 +3,39 @@ import 'package:flutter/foundation.dart';
 
 import 'auth_interceptor.dart';
 import 'config.dart';
-import 'cookie_capture.dart';
-import 'token_store.dart';
 
-/// The three Dio instances from plan §5.4.
+/// The two Dio instances the services use.
+///
+/// The session lives in HttpOnly cookies that the browser stores and sends
+/// itself (`withCredentials`), so the app never sees or handles a token.
 class ApiClient {
-  ApiClient._(this.api, this.bare, this.s3);
+  ApiClient._(this.api, this.bare);
 
-  /// Every API call; Bearer header + single-flight refresh.
+  /// Every API call; refreshes the session once on a 401 and retries.
   final Dio api;
 
   /// `/auth/refresh`, `/auth/logout`, and the retry after a refresh.
   final Dio bare;
 
-  /// Presigned S3 PUTs. Never carries an Authorization header.
-  final Dio s3;
-
-  /// Points the API clients at a different backend (dev builds).
-  void setBaseUrl(String url) {
-    api.options.baseUrl = url;
-    bare.options.baseUrl = url;
-  }
-
   factory ApiClient({
-    required TokenStore tokens,
+    required String baseUrl,
     required void Function() onSessionExpired,
-    String? baseUrl,
   }) {
-    final url =
-        baseUrl ?? AppConfig.apiBaseUrl; // may be set later via setBaseUrl
-    BaseOptions apiOptions() => BaseOptions(
-      baseUrl: url,
+    BaseOptions options() => BaseOptions(
+      baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 30),
       headers: {Headers.acceptHeader: 'application/json'},
-      // On the web the browser hides Set-Cookie from Dart, so CookieCapture
-      // sees nothing: the browser stores the HttpOnly cookies and sends them
-      // itself. Ignored by the native adapters.
-      extra: {'withCredentials': kIsWeb},
+      // Cross-origin API calls carry the auth cookies. Same-origin ones
+      // carry them anyway.
+      extra: {'withCredentials': true},
     );
 
-    final bare = Dio(apiOptions())..interceptors.add(CookieCapture(tokens));
-    final api = Dio(apiOptions())
-      ..interceptors.addAll([
-        CookieCapture(tokens),
-        AuthInterceptor(tokens, bare, onSessionExpired),
-      ]);
+    final bare = Dio(options());
+    final api = Dio(options())
+      ..interceptors.add(AuthInterceptor(bare, onSessionExpired));
     if (kDebugMode && AppConfig.httpLogs) {
-      // Headers and bodies stay off: they would leak tokens and passwords.
+      // Bodies stay off: they would include passwords.
       api.interceptors.add(
         LogInterceptor(
           requestHeader: false,
@@ -60,13 +45,6 @@ class ApiClient {
         ),
       );
     }
-
-    final s3 = Dio(
-      BaseOptions(
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 60),
-      ),
-    );
-    return ApiClient._(api, bare, s3);
+    return ApiClient._(api, bare);
   }
 }

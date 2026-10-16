@@ -195,8 +195,8 @@ void main() {
       () async {
         final a = makeVideo('a', status: VideoStatus.processing);
         final b = makeVideo('b', status: VideoStatus.pending);
-        when(() => videos.mine(page: 1, limit: 10)).thenAnswer(
-          (_) async => PageResult(total: 2, page: 1, limit: 10, items: [a, b]),
+        when(() => videos.mine(page: 1, limit: 24)).thenAnswer(
+          (_) async => PageResult(total: 2, page: 1, limit: 24, items: [a, b]),
         );
         when(() => videos.progress('a')).thenAnswer(
           (_) async => const Progress(
@@ -229,8 +229,8 @@ void main() {
 
     test('poll drops an item deleted elsewhere (video_not_found)', () async {
       final a = makeVideo('a', status: VideoStatus.processing);
-      when(() => videos.mine(page: 1, limit: 10)).thenAnswer(
-        (_) async => PageResult(total: 1, page: 1, limit: 10, items: [a]),
+      when(() => videos.mine(page: 1, limit: 24)).thenAnswer(
+        (_) async => PageResult(total: 1, page: 1, limit: 24, items: [a]),
       );
       when(() => videos.progress('a')).thenThrow(_notFound());
       final cubit = MyVideosCubit(videos);
@@ -244,8 +244,8 @@ void main() {
       'paused polling does nothing; delete removes and lowers total',
       () async {
         final a = makeVideo('a', status: VideoStatus.processing);
-        when(() => videos.mine(page: 1, limit: 10)).thenAnswer(
-          (_) async => PageResult(total: 1, page: 1, limit: 10, items: [a]),
+        when(() => videos.mine(page: 1, limit: 24)).thenAnswer(
+          (_) async => PageResult(total: 1, page: 1, limit: 24, items: [a]),
         );
         when(() => videos.delete('a')).thenAnswer((_) async {});
         final cubit = MyVideosCubit(videos);

@@ -1,10 +1,9 @@
-import 'dart:io';
-
 import 'package:dio/dio.dart';
 
 import '../core/api_exception.dart';
 import '../models/saved_video.dart';
 import '../models/video.dart';
+import '../platform/browser.dart';
 
 class PresignedUpload {
   const PresignedUpload({required this.url, required this.key});
@@ -12,13 +11,13 @@ class PresignedUpload {
   final String key;
 }
 
-/// Presigned-URL upload calls (plan §7). The S3 client never carries an
-/// Authorization header.
+/// Presigned-URL upload calls (plan §7). The PUTs go from the browser
+/// straight to S3, with no cookies and no Authorization header.
 class UploadVideoService {
-  UploadVideoService({required this._api, required this._s3});
+  UploadVideoService({required this._api, required this._browser});
 
   final Dio _api;
-  final Dio _s3;
+  final Browser _browser;
 
   Future<PresignedUpload> thumbnailUrl() => guardApi(() async {
     final res = await _api.get<Map<String, dynamic>>(
@@ -38,37 +37,31 @@ class UploadVideoService {
     );
   });
 
-  /// Streams [file] with an explicit Content-Length. The Content-Type must be
-  /// exactly what the URL was presigned for.
+  /// PUTs [file]. The Content-Type must be exactly what the URL was
+  /// presigned for. Throws [ApiException], or [UploadAborted] on cancel.
   Future<void> put(
     String url,
-    File file,
+    PickedFile file,
     String contentType, {
-    ProgressCallback? onProgress,
-    CancelToken? cancel,
+    UploadProgress? onProgress,
+    UploadCancel? cancel,
   }) async {
     try {
-      await _s3.put<void>(
+      await _browser.put(
         url,
-        data: file.openRead(),
-        options: Options(
-          headers: {
-            Headers.contentTypeHeader: contentType,
-            Headers.contentLengthHeader: await file.length(),
-          },
-        ),
-        onSendProgress: onProgress,
-        cancelToken: cancel,
+        file,
+        contentType: contentType,
+        onProgress: onProgress,
+        cancel: cancel,
       );
-    } on DioException catch (e) {
-      if (CancelToken.isCancel(e)) rethrow;
+    } on UploadFailure catch (e) {
       throw ApiException(
-        kind: e.response == null ? ApiErrorKind.network : ApiErrorKind.server,
-        statusCode: e.response?.statusCode,
-        code: e.response?.statusCode == 403 ? 'upload_forbidden' : null,
-        message: e.response == null
-            ? "Upload interrupted. Check your connection and retry."
-            : 'Upload failed (${e.response?.statusCode}).',
+        kind: e.status == null ? ApiErrorKind.network : ApiErrorKind.server,
+        statusCode: e.status,
+        code: e.status == 403 ? 'upload_forbidden' : null,
+        message: e.status == null
+            ? 'Upload interrupted. Check your connection and retry.'
+            : 'Upload failed (${e.status}).',
       );
     }
   }

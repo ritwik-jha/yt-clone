@@ -1,5 +1,0 @@
-# Copy to android/key.properties (gitignored) to sign release builds.
-storeFile=../upload-keystore.jks
-storePassword=change-me
-keyAlias=upload
-keyPassword=change-me

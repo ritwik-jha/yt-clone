@@ -1,5 +1,5 @@
 // End-to-end flow against the local test backend (SQLite seed + fake
-// Cognito), in headless Chrome. Run the whole pipeline with
+// Cognito + in-memory S3), in headless Chrome. Run the whole pipeline with
 // `scripts/run_pipeline.sh`, or by hand:
 //
 //   cd backend && python scripts/seed_sqlite.py
@@ -7,7 +7,7 @@
 //   uvicorn tests.support.server:app --port 8000 &
 //   chromedriver --port=4444 &
 //   cd ../frontend && flutter drive -d web-server --headless \
-//     --no-web-resources-cdn --browser-dimension=420x3000 \
+//     --no-web-resources-cdn --browser-dimension=1440x2000 \
 //     --web-hostname=127.0.0.1 --web-port=8090 --browser-name=chrome \
 //     --driver=test_driver/integration_test.dart \
 //     --target=integration_test/seeded_flow_test.dart \
@@ -15,16 +15,19 @@
 //
 // The expected titles and accounts are the ones in
 // backend/tests/support/seed_data.py. Keep the two in step.
+import 'dart:async';
+import 'dart:js_interop';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:ytp_app/core/server_settings.dart';
-import 'package:ytp_app/core/token_store.dart';
-import 'package:ytp_app/main.dart';
-import 'package:ytp_app/widgets/video_card.dart';
+import 'package:web/web.dart' as web;
+import 'package:ytp_app/app/app.dart';
+import 'package:ytp_app/platform/browser.dart';
+import 'package:ytp_app/widgets/video_grid_card.dart';
+import 'package:ytp_app/widgets/video_list_tile.dart';
 
 const _apiUrl = String.fromEnvironment(
   'API_BASE_URL',
@@ -49,6 +52,94 @@ const _aliceTitles = [
   'Private video diary',
 ];
 
+/// The real browser, except that file choosers return [picks] in order: a
+/// test can't click through the OS dialog. Uploads, frame capture, and JPEG
+/// conversion are the real thing.
+class _ScriptedBrowser implements Browser {
+  _ScriptedBrowser(this._real);
+  final Browser _real;
+  final picks = <PickedFile>[];
+
+  @override
+  Future<PickedFile?> pickFile({required String accept}) async =>
+      picks.isEmpty ? null : picks.removeAt(0);
+
+  @override
+  void Function() listenForDrops(void Function(PickedFile file) onFile) =>
+      _real.listenForDrops(onFile);
+
+  @override
+  Future<PickedFile?> captureFrame(PickedFile video) =>
+      _real.captureFrame(video);
+
+  @override
+  Future<PickedFile?> toJpeg(PickedFile image) => _real.toJpeg(image);
+
+  @override
+  String objectUrl(PickedFile file) => _real.objectUrl(file);
+
+  @override
+  void revokeUrl(String url) => _real.revokeUrl(url);
+
+  @override
+  Future<void> put(
+    String url,
+    PickedFile file, {
+    required String contentType,
+    UploadProgress? onProgress,
+    UploadCancel? cancel,
+  }) => _real.put(
+    url,
+    file,
+    contentType: contentType,
+    onProgress: onProgress,
+    cancel: cancel,
+  );
+
+  @override
+  void setLeaveWarning(bool on) => _real.setLeaveWarning(on);
+
+  @override
+  ValueListenable<bool> get fullscreen => _real.fullscreen;
+
+  @override
+  Future<void> setFullscreen(bool on) => _real.setFullscreen(on);
+}
+
+/// 64 KB that claim to be an MP4. The browser can't decode them, so the
+/// upload page asks for a thumbnail image instead.
+PickedFile _fakeVideo() {
+  final blob = web.Blob(
+    [Uint8List(64 * 1024).toJS].toJS,
+    web.BlobPropertyBag(type: 'video/mp4'),
+  );
+  return PickedFile(
+    name: 'e2e-clip.mp4',
+    size: blob.size,
+    type: blob.type,
+    handle: blob,
+  );
+}
+
+/// A small PNG drawn on a canvas.
+Future<PickedFile> _png() async {
+  final canvas = web.HTMLCanvasElement()
+    ..width = 320
+    ..height = 180;
+  final ctx = canvas.getContext('2d')! as web.CanvasRenderingContext2D;
+  ctx.fillStyle = '#c62828'.toJS;
+  ctx.fillRect(0, 0, 320, 180);
+  final done = Completer<web.Blob>();
+  canvas.toBlob(((web.Blob? b) => done.complete(b!)).toJS, 'image/png');
+  final blob = await done.future;
+  return PickedFile(
+    name: 'cover.png',
+    size: blob.size,
+    type: blob.type,
+    handle: blob,
+  );
+}
+
 Future<void> _pumpUntil(
   WidgetTester tester,
   Finder finder, {
@@ -58,17 +149,15 @@ Future<void> _pumpUntil(
   while (DateTime.now().isBefore(end)) {
     await tester.pump(const Duration(milliseconds: 100));
     if (finder.evaluate().isNotEmpty) {
-      // Let a route transition finish, or the page underneath is still
-      // onstage and its fields match too.
-      await tester.pump(const Duration(milliseconds: 600));
+      // Let the page settle (data loading in, dialogs opening).
+      await tester.pump(const Duration(milliseconds: 400));
       return;
     }
   }
   throw TestFailure('Timed out waiting for $finder');
 }
 
-Future<void> _enter(WidgetTester tester, String label, String text) async {
-  final field = find.widgetWithText(TextFormField, label);
+Future<void> _type(WidgetTester tester, Finder field, String text) async {
   String current() => tester
       .widget<EditableText>(
         find.descendant(of: field, matching: find.byType(EditableText)),
@@ -84,55 +173,75 @@ Future<void> _enter(WidgetTester tester, String label, String text) async {
   await tester.pump();
   await tester.enterText(field, text);
   await tester.pump();
-  expect(current(), text, reason: 'typing into "$label"');
+  expect(current(), text, reason: 'typing into $field');
 }
 
-Future<void> _tapButton(WidgetTester tester, String label) async {
-  final button = find.widgetWithText(FilledButton, label);
-  await tester.ensureVisible(button);
-  await tester.tap(button);
+Future<void> _enter(WidgetTester tester, String label, String text) =>
+    _type(tester, find.widgetWithText(TextFormField, label), text);
+
+Future<void> _tap(WidgetTester tester, Finder finder) async {
+  await tester.ensureVisible(finder);
+  await tester.pump();
+  await tester.tap(finder);
   await tester.pump();
 }
 
-/// Waits for [title] to be built, then scrolls it into view. Run with a
-/// tall window (`--browser-dimension=420x3000`) so every seeded card is
-/// built without drag-scrolling.
-Future<void> _scrollTo(WidgetTester tester, String title) async {
-  await _pumpUntil(tester, find.text(title));
-  await tester.ensureVisible(find.text(title));
-  await tester.pump();
-}
+Future<void> _tapButton(WidgetTester tester, String label) =>
+    _tap(tester, find.widgetWithText(FilledButton, label));
 
-Future<void> _logOut(WidgetTester tester) async {
-  await tester.tap(find.byTooltip('Account'));
-  await _pumpUntil(tester, find.text('Log out'));
-  await tester.tap(find.text('Log out'));
+Future<void> _signIn(WidgetTester tester, String email) async {
   await _pumpUntil(tester, find.widgetWithText(FilledButton, 'Sign In'));
+  await _enter(tester, 'Email', email);
+  await _enter(tester, 'Password', _password);
+  await _tapButton(tester, 'Sign In');
+  await _pumpUntil(tester, find.byTooltip('Account'));
+}
+
+Future<void> _accountMenu(WidgetTester tester, String item) async {
+  await _tap(tester, find.byTooltip('Account'));
+  await _pumpUntil(tester, find.text(item));
+  // The open menu is built last; the guide may have the same label.
+  await _tap(tester, find.text(item).last);
+}
+
+Future<void> _signOut(WidgetTester tester) async {
+  await _accountMenu(tester, 'Sign out');
+  await _pumpUntil(tester, find.widgetWithText(OutlinedButton, 'SIGN IN'));
 }
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('sign up, browse the seeded feed, edit as owner, log out', (
+  testWidgets('browse signed out, sign up, search, watch, upload, edit', (
     tester,
   ) async {
     final api = Dio(BaseOptions(baseUrl: _apiUrl));
     final health = await api.get<Map<String, dynamic>>('/healthz');
     expect(health.data, {'status': 'ok'}, reason: 'backend not up at $_apiUrl');
 
-    SharedPreferences.setMockInitialValues({'installed': true});
-    final prefs = await SharedPreferences.getInstance();
-    final tokens = TokenStore(MemoryKv());
-    final settings = ServerSettings(
-      prefs: prefs,
-      tokens: tokens,
-      compileTimeUrl: _apiUrl,
-    );
-    await tester.pumpWidget(
-      YtpApp(prefs: prefs, tokens: tokens, settings: settings),
-    );
+    final browser = _ScriptedBrowser(createBrowser());
+    await tester.pumpWidget(YtpApp(apiBaseUrl: _apiUrl, browser: browser));
 
-    // 1. A fresh install with no cookie lands on Sign Up.
+    // 1. Signed out, Home shows the public feed, newest first, row by row.
+    await _pumpUntil(tester, find.byType(VideoGridCard));
+    await _pumpUntil(tester, find.text(_feedTitles.last));
+    Offset at(String title) => tester.getTopLeft(find.text(title));
+    for (var i = 1; i < _feedTitles.length; i++) {
+      final prev = at(_feedTitles[i - 1]);
+      final next = at(_feedTitles[i]);
+      expect(
+        next.dy > prev.dy || (next.dy == prev.dy && next.dx > prev.dx),
+        isTrue,
+        reason: '${_feedTitles[i]} should follow ${_feedTitles[i - 1]}',
+      );
+    }
+    expect(find.text('Private video diary'), findsNothing);
+    expect(find.text('Still transcoding'), findsNothing);
+
+    // 2. Sign up from the masthead's SIGN IN.
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'SIGN IN').first);
+    await _pumpUntil(tester, find.widgetWithText(FilledButton, 'Sign In'));
+    await _tap(tester, find.widgetWithText(TextButton, 'Sign Up'));
     await _pumpUntil(tester, find.text('Create account'));
     final email = 'e2e-${DateTime.now().millisecondsSinceEpoch}@example.com';
     await _enter(tester, 'Name', 'E2E Viewer');
@@ -140,7 +249,7 @@ void main() {
     await _enter(tester, 'Password', _password);
     await _tapButton(tester, 'Sign Up');
 
-    // 2. Confirm: a wrong code is rejected, the seeded one works.
+    // 3. Confirm: a wrong code is rejected, the seeded one works.
     await _pumpUntil(tester, find.text('Confirm Sign Up'));
     await _enter(tester, 'Verification code', '000000');
     await _tapButton(tester, 'Confirm');
@@ -148,73 +257,65 @@ void main() {
     await _enter(tester, 'Verification code', _otp);
     await _tapButton(tester, 'Confirm');
 
-    // 3. Sign in: bad password first, then the real one.
+    // 4. Sign in (email carried over): bad password, then the real one,
+    // which lands back on Home.
     await _pumpUntil(tester, find.widgetWithText(FilledButton, 'Sign In'));
-    await _enter(tester, 'Email', email);
+    expect(find.widgetWithText(TextFormField, email), findsOneWidget);
     await _enter(tester, 'Password', 'Wrong-Passw0rd');
     await _tapButton(tester, 'Sign In');
     await _pumpUntil(tester, find.text('Incorrect email or password'));
     await _enter(tester, 'Password', _password);
     await _tapButton(tester, 'Sign In');
+    await _pumpUntil(tester, find.byTooltip('Account'));
+    await _pumpUntil(tester, find.byType(VideoGridCard));
 
-    // 4. Home shows the seeded public feed, newest first.
-    await _pumpUntil(tester, find.byType(VideoCard));
-    for (final (i, title) in _feedTitles.indexed) {
-      await _scrollTo(tester, title);
-      // Newest first: each title sits below the previous one when both show.
-      final prev = i == 0 ? null : find.text(_feedTitles[i - 1]);
-      if (prev != null && prev.evaluate().isNotEmpty) {
-        expect(
-          tester.getTopLeft(find.text(title)).dy,
-          greaterThan(tester.getTopLeft(prev).dy),
-        );
-      }
-    }
-    expect(find.text('Private video diary'), findsNothing);
-    expect(find.text('Still transcoding'), findsNothing);
+    // 5. Search from the masthead.
+    await _type(tester, find.widgetWithText(TextField, 'Search'), 'guitar');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await _pumpUntil(tester, find.byType(VideoListTile));
+    expect(find.byType(VideoListTile), findsOneWidget);
+    expect(find.text('Fingerstyle guitar basics'), findsOneWidget);
 
-    // 5. Open a video: details come from the backend.
-    await _scrollTo(tester, 'Fingerstyle guitar basics');
-    await tester.tap(find.text('Fingerstyle guitar basics'));
-    await _pumpUntil(
-      tester,
-      find.text('Playback is not available in the web build yet'),
-    );
-    await _pumpUntil(tester, find.textContaining('Bob Tester'));
-    expect(find.byTooltip('More options'), findsNothing); // not the owner
-    await tester.pageBack();
-    await _pumpUntil(tester, find.byType(VideoCard));
+    // 6. Watch it: details from the backend, no owner actions.
+    await _tap(tester, find.text('Fingerstyle guitar basics'));
+    await _pumpUntil(tester, find.text('SHARE'));
+    expect(find.text('Bob Tester'), findsWidgets);
+    expect(find.text('EDIT'), findsNothing);
 
-    // 6. Log out, sign in as the seeded owner.
-    await _logOut(tester);
-    await _enter(tester, 'Email', _alice);
-    await _enter(tester, 'Password', _password);
-    await _tapButton(tester, 'Sign In');
-    await _pumpUntil(tester, find.byType(VideoCard));
+    // 7. The creator's channel lists their two public, ready videos.
+    await _tap(tester, find.text('Bob Tester').first);
+    await _pumpUntil(tester, find.textContaining('2 videos'));
+    expect(find.text('Uploads'), findsOneWidget);
 
-    // 7. My videos lists all of Alice's uploads, private and unfinished too.
-    await tester.tap(find.byTooltip('Account'));
-    await _pumpUntil(tester, find.text('My videos'));
-    await tester.tap(find.text('My videos'));
-    await _pumpUntil(tester, find.byType(VideoCard));
+    // 8. Sign out; sign in as the seeded owner.
+    await _signOut(tester);
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'SIGN IN').first);
+    await _signIn(tester, _alice);
+
+    // 9. Your videos lists all of Alice's uploads, private and unfinished too.
+    await _accountMenu(tester, 'Your videos');
+    await _pumpUntil(tester, find.text('Your videos').last);
     for (final title in _aliceTitles) {
-      await _scrollTo(tester, title);
+      await _pumpUntil(tester, find.text(title));
     }
 
-    // 8. Edit a title as the owner; the backend has it afterwards.
+    // 10. Edit a title; the backend has it afterwards.
     const newTitle = 'Dal tadka, edited end to end';
-    await _scrollTo(tester, 'Ten-minute dal tadka');
-    await tester.tap(find.text('Ten-minute dal tadka'));
-    await _pumpUntil(tester, find.byTooltip('More options'));
-    await tester.tap(find.byTooltip('More options'));
-    await _pumpUntil(tester, find.text('Edit'));
-    await tester.tap(find.text('Edit'));
-    await _pumpUntil(tester, find.widgetWithText(TextFormField, 'Title'));
+    // The Edit button on the same row as the title.
+    final titleY = tester.getCenter(find.text('Ten-minute dal tadka')).dy;
+    final edits = find.byTooltip('Edit').evaluate().toList();
+    edits.sort(
+      (a, b) => (tester.getCenter(find.byWidget(a.widget)).dy - titleY)
+          .abs()
+          .compareTo(
+            (tester.getCenter(find.byWidget(b.widget)).dy - titleY).abs(),
+          ),
+    );
+    await _tap(tester, find.byWidget(edits.first.widget));
+    await _pumpUntil(tester, find.text('Video details'));
     await _enter(tester, 'Title', newTitle);
-    await tester.tap(find.text('Save'));
+    await _tap(tester, find.widgetWithText(FilledButton, 'SAVE'));
     await _pumpUntil(tester, find.text(newTitle));
-    await tester.pump(const Duration(seconds: 1));
-
     final feed = await api.get<Map<String, dynamic>>(
       '/video/feed',
       queryParameters: {'limit': 50},
@@ -225,13 +326,27 @@ void main() {
     expect(titles, contains(newTitle));
     expect(titles, isNot(contains('Ten-minute dal tadka')));
 
-    // 9. Back home and log out.
-    await tester.pageBack();
-    await _pumpUntil(tester, find.text('My videos'));
-    await tester.pageBack();
-    await _pumpUntil(tester, find.byTooltip('Account'));
-    await _logOut(tester);
-    // Web only: it expects the web player placeholder and the local test
-    // backend, which a phone or emulator can't reach at 127.0.0.1.
+    // 11. Upload from the browser: the video can't be decoded, so it asks
+    // for a thumbnail image; both go to the presigned URLs, then the save.
+    browser.picks
+      ..add(_fakeVideo())
+      ..add(await _png());
+    await _tap(tester, find.widgetWithText(FilledButton, 'UPLOAD VIDEO'));
+    await _pumpUntil(tester, find.text('SELECT FILE'));
+    await _tapButton(tester, 'SELECT FILE');
+    await _pumpUntil(tester, find.textContaining("Couldn't take a thumbnail"));
+    expect(find.widgetWithText(TextFormField, 'e2e-clip'), findsOneWidget);
+    await _tap(tester, find.text('UPLOAD THUMBNAIL'));
+    await _pumpUntil(tester, find.text('CHANGE THUMBNAIL'));
+    await _tapButton(tester, 'UPLOAD');
+    await _pumpUntil(tester, find.text('Upload complete'));
+    await _tapButton(tester, 'GO TO YOUR VIDEOS');
+    await _pumpUntil(tester, find.text('e2e-clip'));
+    expect(find.text('Pending'), findsOneWidget);
+
+    // 12. Sign out from a signed-in-only page: back to Sign in.
+    await _accountMenu(tester, 'Sign out');
+    await _pumpUntil(tester, find.widgetWithText(FilledButton, 'Sign In'));
+    expect(find.byTooltip('Account'), findsNothing);
   }, skip: !kIsWeb);
 }

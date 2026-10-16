@@ -1,11 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ytp_app/models/page_result.dart';
 import 'package:ytp_app/models/progress.dart';
 import 'package:ytp_app/models/video.dart';
+import 'package:ytp_app/platform/video_player.dart';
 
 void main() {
   final json = jsonDecode(
@@ -23,11 +23,29 @@ void main() {
     expect(page.hasMore, isFalse);
   });
 
-  test('playbackUrl: HLS on iOS, DASH on Android; null hls_url on iOS', () {
-    final v = page.items.first;
-    expect(v.playbackUrlFor(TargetPlatform.iOS), endsWith('master.m3u8'));
-    expect(v.playbackUrlFor(TargetPlatform.android), endsWith('manifest.mpd'));
-    expect(page.items.last.playbackUrlFor(TargetPlatform.iOS), isNull);
+  test('playbackSource: HLS when there is one, else DASH, else none', () {
+    expect(
+      page.items.first.playbackSource,
+      const PlaybackSource(
+        'https://cdn.example.com/1/dash/master.m3u8',
+        StreamKind.hls,
+      ),
+    );
+    // Transcoded before the pipeline wrote HLS.
+    expect(
+      page.items.last.playbackSource,
+      const PlaybackSource(
+        'https://cdn.example.com/2/dash/manifest.mpd',
+        StreamKind.dash,
+      ),
+    );
+    final unfinished = Video.fromJson({
+      ...(json['items'] as List).first as Map<String, dynamic>,
+      'manifest_url': null,
+      'hls_url': null,
+    });
+    expect(unfinished.playbackSource, isNull);
+    expect(unfinished.isPlayable, isFalse);
   });
 
   test('unknown enum values do not crash', () {

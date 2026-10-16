@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../app/routes.dart';
+
+import '../../core/theme.dart';
 import '../../core/validators.dart';
 import '../../cubits/auth/auth_cubit.dart';
 import '../../cubits/auth/auth_state.dart';
@@ -8,23 +12,21 @@ import '../../cubits/session/session_cubit.dart';
 import '../../cubits/session/session_state.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/auth_scaffold.dart';
-import 'confirm_signup_page.dart';
-import 'forgot_password_page.dart';
-import 'sign_up_page.dart';
 
 class LoginPage extends StatefulWidget {
-  const LoginPage({super.key, this.email});
+  const LoginPage({super.key, this.email, this.next});
 
   final String? email;
 
-  /// The page wrapped with its own [AuthCubit].
-  static Widget provided(BuildContext ctx, {String? email}) => BlocProvider(
-    create: (_) => AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
-    child: LoginPage(email: email),
-  );
+  /// Where to go once signed in (the router's redirect takes it there).
+  final String? next;
 
-  static Route<void> route({String? email}) =>
-      MaterialPageRoute(builder: (ctx) => provided(ctx, email: email));
+  /// The page wrapped with its own [AuthCubit].
+  static Widget provided({String? email, String? next}) => BlocProvider(
+    create: (ctx) =>
+        AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
+    child: LoginPage(email: email, next: next),
+  );
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -60,10 +62,11 @@ class _LoginPageState extends State<LoginPage> {
       listener: (context, state) {
         switch (state) {
           case AuthNeedsVerification(:final email):
-            Navigator.of(context)
-                .push(ConfirmSignUpPage.route(email, sendCodeOnOpen: true));
+            context.go(
+              Routes.verifyPage(email, resend: true, next: widget.next),
+            );
           case AuthNeedsPasswordReset(:final email):
-            Navigator.of(context).push(ForgotPasswordPage.route(email: email));
+            context.go(Routes.forgotPasswordPage(email: email));
           case AuthError(:final code, :final message):
             if (code == 'incorrect_credentials') passwordController.clear();
             if (code == 'too_many_attempts') showSnack(context, message);
@@ -112,9 +115,9 @@ class _LoginPageState extends State<LoginPage> {
             Align(
               alignment: Alignment.centerLeft,
               child: TextButton(
-                onPressed: () => Navigator.of(
-                  context,
-                ).push(ForgotPasswordPage.route(email: emailController.text)),
+                onPressed: () => context.go(
+                  Routes.forgotPasswordPage(email: emailController.text.trim()),
+                ),
                 child: const Text('Forgot password?'),
               ),
             ),
@@ -127,7 +130,7 @@ class _LoginPageState extends State<LoginPage> {
                     const Icon(
                       Icons.error_outline,
                       size: 18,
-                      color: Color(0xFFFF6E6E),
+                      color: YtColors.error,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -135,12 +138,12 @@ class _LoginPageState extends State<LoginPage> {
                         'user_not_found' => 'No account for this email',
                         'unsupported_challenge' => "This account needs a sign-in step the app doesn't support",
                         _ => formError.message,
-                      }, style: const TextStyle(color: Color(0xFFFF6E6E))),
+                      }, style: const TextStyle(color: YtColors.error)),
                     ),
                     if (formError.code == 'user_not_found')
                       TextButton(
                         onPressed: () =>
-                            Navigator.of(context).push(SignUpPage.route()),
+                            context.go(Routes.signUpPage(next: widget.next)),
                         child: const Text('Sign up'),
                       ),
                   ],
@@ -158,7 +161,7 @@ class _LoginPageState extends State<LoginPage> {
                 const Text("Don't have an account?"),
                 TextButton(
                   onPressed: () =>
-                      Navigator.of(context).push(SignUpPage.route()),
+                      context.go(Routes.signUpPage(next: widget.next)),
                   child: const Text('Sign Up'),
                 ),
               ],

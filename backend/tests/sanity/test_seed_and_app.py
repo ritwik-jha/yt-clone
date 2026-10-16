@@ -64,6 +64,10 @@ def test_feed_reads_seeded_rows(client):
 def test_login_and_me(client):
     r = client.post("/auth/login", json={"email": seed_data.ALICE.email, "password": seed_data.PASSWORD})
     assert r.status_code == 200
-    token = r.cookies["access_token"]
-    me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).json()
+    me = client.get("/auth/me").json()
     assert me["id"] == str(seed_data.ALICE.id)
+    # Cookies only: the Authorization header is not an auth path.
+    token = client.cookies["access_token"]
+    client.cookies.clear()
+    r = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert (r.status_code, r.json()["code"]) == (401, "missing_access_token")

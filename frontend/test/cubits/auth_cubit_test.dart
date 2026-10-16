@@ -1,9 +1,8 @@
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:ytp_app/core/api_exception.dart';
-import 'package:ytp_app/core/token_store.dart';
 import 'package:ytp_app/cubits/auth/auth_cubit.dart';
 import 'package:ytp_app/cubits/auth/auth_state.dart';
 import 'package:ytp_app/cubits/session/session_cubit.dart';
@@ -22,18 +21,13 @@ const _me = UserProfile(id: 'u1', name: 'Ada', email: 'a@b.co');
 void main() {
   late MockAuthService auth;
   late SessionCubit session;
-  late TokenStore tokens;
 
-  setUp(() async {
-    SharedPreferences.setMockInitialValues({});
+  setUp(() {
     auth = MockAuthService();
-    tokens = TokenStore(MemoryKv());
-    session = SessionCubit(
-      auth: auth,
-      tokens: tokens,
-      prefs: await SharedPreferences.getInstance(),
-    );
+    session = SessionCubit(auth: auth);
   });
+
+  tearDown(() => session.close());
 
   group('AuthCubit', () {
     blocTest<AuthCubit, AuthState>(
@@ -134,97 +128,92 @@ void main() {
     );
   });
 
-  group('SessionCubit.restore', () {
-    test('no refresh token -> unauthenticated, no network call', () async {
-      await session.restore();
-      expect(session.state, const SessionUnauthenticated());
-      verifyNever(() => auth.me());
-    });
-
-    test('valid session -> authenticated', () async {
-      SharedPreferences.setMockInitialValues({installedFlag: true});
-      session = SessionCubit(
-        auth: auth,
-        tokens: tokens,
-        prefs: await SharedPreferences.getInstance(),
-      );
-      await tokens.save(refreshTokenKey, 'r', maxAgeSeconds: 100);
+  group('SessionCubit', () {
+    test('restore with a valid cookie -> authenticated', () async {
       when(() => auth.me()).thenAnswer((_) async => _me);
       await session.restore();
       expect(session.state, const SessionAuthenticated(_me));
-      expect(session.hasSignedInBefore, isTrue);
+      expect(session.user, _me);
     });
 
-    test('network failure keeps the tokens and shows Unavailable', () async {
-      SharedPreferences.setMockInitialValues({installedFlag: true});
-      session = SessionCubit(
-        auth: auth,
-        tokens: tokens,
-        prefs: await SharedPreferences.getInstance(),
-      );
-      await tokens.save(refreshTokenKey, 'r', maxAgeSeconds: 100);
-      when(() => auth.me()).thenThrow(
-        const ApiException(kind: ApiErrorKind.network, message: 'offline'),
-      );
-      await session.restore();
-      expect(session.state, isA<SessionUnavailable>());
-      expect(await tokens.refreshToken(), 'r');
-    });
-
-    test('401 that refresh could not fix clears tokens', () async {
-      SharedPreferences.setMockInitialValues({installedFlag: true});
-      session = SessionCubit(
-        auth: auth,
-        tokens: tokens,
-        prefs: await SharedPreferences.getInstance(),
-      );
-      await tokens.save(refreshTokenKey, 'r', maxAgeSeconds: 100);
-      when(() => auth.me()).thenThrow(_err('token_invalid', status: 401));
-      await session.restore();
-      expect(session.state, const SessionUnauthenticated());
-      expect(await tokens.refreshToken(), isNull);
-    });
-
-    test('first run wipes tokens left over from a previous install', () async {
-      await tokens.save(refreshTokenKey, 'stale', maxAgeSeconds: 100);
-      await session.restore(); // "installed" flag is missing
-      expect(session.state, const SessionUnauthenticated());
-      verifyNever(() => auth.me());
-    });
-
-    test('expired() is ignored unless signed in', () async {
-      session.expired();
-      expect(session.state, const SessionUnknown());
-    });
-
-    test('web: restore asks the server even with no stored token', () async {
-      SharedPreferences.setMockInitialValues({installedFlag: true});
-      session = SessionCubit(
-        auth: auth,
-        tokens: tokens,
-        prefs: await SharedPreferences.getInstance(),
-        browserCookies: true,
-      );
-      when(() => auth.me()).thenAnswer((_) async => _me);
-      await session.restore();
-      expect(session.state, const SessionAuthenticated(_me));
-
+    test('restore with no session -> unauthenticated, no message', () async {
       when(() => auth.me())
           .thenThrow(_err('missing_access_token', status: 401));
       await session.restore();
       expect(session.state, const SessionUnauthenticated());
     });
 
-    test('expired() sets a message; logout clears', () async {
-      await session.signedIn(_me);
+    test('restore when the server is unreachable -> Unavailable', () async {
+      when(() => auth.me()).thenThrow(
+        const ApiException(kind: ApiErrorKind.network, message: 'offline'),
+      );
+      await session.restore();
+      expect(session.state, isA<SessionUnavailable>());
+    });
+
+    test('expired() is ignored unless signed in', () {
+      session.expired();
+      expect(session.state, const SessionUnknown());
+      session.signedIn(_me);
       session.expired();
       expect(
         session.state,
         const SessionUnauthenticated(message: 'Session expired, sign in again'),
       );
+    });
+
+    test('logout revokes and signs out', () async {
       when(() => auth.logout()).thenAnswer((_) async {});
+      session.signedIn(_me);
       await session.logout();
+      verify(() => auth.logout()).called(1);
       expect(session.state, const SessionUnauthenticated());
+    });
+
+    test('renews the access cookie while signed in, stops after', () {
+      fakeAsync((clock) {
+        when(() => auth.refresh()).thenAnswer((_) async {});
+        when(() => auth.logout()).thenAnswer((_) async {});
+        final s = SessionCubit(
+          auth: auth,
+          refreshEvery: const Duration(minutes: 50),
+        )..signedIn(_me);
+        clock.elapse(const Duration(minutes: 101));
+        verify(() => auth.refresh()).called(2);
+        s.logout();
+        clock.elapse(const Duration(hours: 2));
+        verifyNever(() => auth.refresh());
+        s.close();
+      });
+    });
+
+    test('a refresh rejected with 401 ends the session', () {
+      fakeAsync((clock) {
+        when(() => auth.refresh())
+            .thenThrow(_err('refresh_token_invalid', status: 401));
+        final s = SessionCubit(
+          auth: auth,
+          refreshEvery: const Duration(minutes: 50),
+        )..signedIn(_me);
+        clock.elapse(const Duration(minutes: 51));
+        expect(s.state, isA<SessionUnauthenticated>());
+        s.close();
+      });
+    });
+
+    test('a refresh that fails on the network keeps the session', () {
+      fakeAsync((clock) {
+        when(() => auth.refresh()).thenThrow(
+          const ApiException(kind: ApiErrorKind.network, message: 'offline'),
+        );
+        final s = SessionCubit(
+          auth: auth,
+          refreshEvery: const Duration(minutes: 50),
+        )..signedIn(_me);
+        clock.elapse(const Duration(minutes: 51));
+        expect(s.state, const SessionAuthenticated(_me));
+        s.close();
+      });
     });
   });
 }

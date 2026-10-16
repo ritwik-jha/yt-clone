@@ -1,34 +1,29 @@
-import 'package:flutter/foundation.dart';
+import 'dart:async';
+
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/api_exception.dart';
-import '../../core/token_store.dart';
 import '../../models/user_profile.dart';
 import '../../services/auth_service.dart';
 import 'session_state.dart';
 
-const installedFlag = 'installed';
-const hasSignedInBeforeFlag = 'has_signed_in_before';
-
-/// Owns the signed-in state at the app root (plan §5.5).
+/// Who is signed in, at the app root (plan §5.5). Browsing works signed out;
+/// only uploading and Your videos need a session.
+///
+/// The session is the browser's HttpOnly cookies, so [restore] asks
+/// `/auth/me` whether there is one. While signed in, the access cookie is
+/// renewed every [refreshEvery], before it (and its 1-hour Cognito token)
+/// expires: endpoints with optional auth would otherwise answer an expired
+/// session as anonymous, hiding the owner's private videos.
 class SessionCubit extends Cubit<SessionState> {
   SessionCubit({
     required this._auth,
-    required this._tokens,
-    required this._prefs,
-    this.browserCookies = kIsWeb,
+    this.refreshEvery = const Duration(minutes: 50),
   }) : super(const SessionUnknown());
 
   final AuthService _auth;
-  final TokenStore _tokens;
-  final SharedPreferences _prefs;
-
-  /// Web builds: the session is HttpOnly cookies the app cannot read, so
-  /// [restore] asks `/auth/me` instead of looking for a stored token.
-  final bool browserCookies;
-
-  bool get hasSignedInBefore => _prefs.getBool(hasSignedInBeforeFlag) ?? false;
+  final Duration refreshEvery;
+  Timer? _timer;
 
   UserProfile? get user => switch (state) {
     SessionAuthenticated(:final user) => user,
@@ -37,27 +32,12 @@ class SessionCubit extends Cubit<SessionState> {
 
   Future<void> restore() async {
     emit(const SessionUnknown());
-
-    // iOS Keychain items outlive an uninstall; shared_preferences doesn't.
-    if (!(_prefs.getBool(installedFlag) ?? false)) {
-      await _tokens.clear();
-      await _prefs.setBool(installedFlag, true);
-    }
-
-    if (!browserCookies && await _tokens.refreshToken() == null) {
-      await _tokens.clear();
-      emit(const SessionUnauthenticated());
-      return;
-    }
-
     try {
       final me = await _auth.me();
-      await _prefs.setBool(hasSignedInBeforeFlag, true);
-      emit(SessionAuthenticated(me));
+      _authenticated(me);
     } on ApiException catch (e) {
       if (e.kind == ApiErrorKind.unauthorized) {
-        await _tokens.clear();
-        emit(const SessionUnauthenticated());
+        _signedOut(const SessionUnauthenticated());
       } else {
         emit(
           SessionUnavailable(
@@ -70,23 +50,48 @@ class SessionCubit extends Cubit<SessionState> {
     }
   }
 
-  Future<void> signedIn(UserProfile user) async {
-    await _prefs.setBool(hasSignedInBeforeFlag, true);
-    emit(SessionAuthenticated(user));
-  }
+  void signedIn(UserProfile user) => _authenticated(user);
 
   /// Called by the auth interceptor when a refresh fails with 401.
   void expired() {
-    // Only a live session can expire. During restore() (a web visit with no
+    // Only a live session can expire. During restore() (a visit with no
     // cookie) the 401 is handled there, without the "expired" message.
     if (state is! SessionAuthenticated) return;
-    emit(
+    _signedOut(
       const SessionUnauthenticated(message: 'Session expired, sign in again'),
     );
   }
 
   Future<void> logout() async {
+    _timer?.cancel();
     await _auth.logout();
-    emit(const SessionUnauthenticated());
+    _signedOut(const SessionUnauthenticated());
+  }
+
+  void _authenticated(UserProfile user) {
+    _timer?.cancel();
+    _timer = Timer.periodic(refreshEvery, (_) => _refresh());
+    emit(SessionAuthenticated(user));
+  }
+
+  void _signedOut(SessionUnauthenticated state) {
+    _timer?.cancel();
+    _timer = null;
+    emit(state);
+  }
+
+  Future<void> _refresh() async {
+    try {
+      await _auth.refresh();
+    } on ApiException catch (e) {
+      // A network blip keeps the session; the next tick or a 401 retries.
+      if (e.kind == ApiErrorKind.unauthorized) expired();
+    }
+  }
+
+  @override
+  Future<void> close() {
+    _timer?.cancel();
+    return super.close();
   }
 }

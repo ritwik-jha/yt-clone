@@ -1,99 +1,72 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
-import 'package:flutter_bloc/flutter_bloc.dart';
-
-import '../core/server_settings.dart';
+import '../app/routes.dart';
 import '../core/theme.dart';
-import 'brand_mark.dart';
-import 'server_url_dialog.dart';
+import 'brand_logo.dart';
 
-/// Shared layout for the auth screens: logo mark, title, form.
+/// Shared layout for the auth pages: a card centred on the page, with the
+/// logo (a link home), title, subtitle, and the form.
 class AuthScaffold extends StatelessWidget {
   const AuthScaffold({
     super.key,
     required this.title,
     this.subtitle,
     required this.children,
-    this.showBack = false,
   });
 
   final String title;
   final String? subtitle;
   final List<Widget> children;
-  final bool showBack;
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: showBack
-        ? AppBar(
-            actions: [
-              ServerUrlButton(settings: context.read<ServerSettings>()),
-            ],
-          )
-        : null,
-    body: SafeArea(
-      child: Stack(
-        children: [
-          Positioned.fill(child: _form()),
-          if (!showBack)
-            Positioned(
-              top: 0,
-              right: 4,
-              child: ServerUrlButton(settings: context.read<ServerSettings>()),
+    body: Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 32),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 448),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(40, 40, 40, 32),
+            decoration: BoxDecoration(
+              color: YtColors.surface,
+              border: Border.all(color: YtColors.divider),
+              borderRadius: BorderRadius.circular(8),
             ),
-        ],
-      ),
-    ),
-  );
-
-  Widget _form() => Center(
-    child: SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const _LogoMark(),
-            const SizedBox(height: 28),
-            Text(
-              title,
-              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w700),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: InkWell(
+                    onTap: () => context.go(Routes.home),
+                    child: const Padding(
+                      padding: EdgeInsets.all(4),
+                      child: BrandLogo(height: 24),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 24),
+                ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    subtitle!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: YtColors.textSecondary),
+                  ),
+                ],
+                const SizedBox(height: 32),
+                ...children,
+              ],
             ),
-            if (subtitle != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                subtitle!,
-                style: const TextStyle(color: YtColors.textSecondary),
-              ),
-            ],
-            const SizedBox(height: 24),
-            ...children,
-          ],
+          ),
         ),
       ),
     ),
-  );
-}
-
-class _LogoMark extends StatelessWidget {
-  const _LogoMark();
-
-  @override
-  Widget build(BuildContext context) => Row(
-    mainAxisAlignment: MainAxisAlignment.start,
-    children: [
-      const BrandMark(size: 36),
-      const SizedBox(width: 8),
-      const Text(
-        'Video Stream',
-        style: TextStyle(
-          fontSize: 20,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -0.5,
-        ),
-      ),
-    ],
   );
 }
 
@@ -157,7 +130,7 @@ class LoadingLabel extends StatelessWidget {
       ? const SizedBox(
           height: 20,
           width: 20,
-          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
         )
       : Text(label);
 }

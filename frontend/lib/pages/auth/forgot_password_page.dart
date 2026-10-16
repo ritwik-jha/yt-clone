@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../app/routes.dart';
 
 import '../../core/validators.dart';
 import '../../cubits/auth/auth_cubit.dart';
@@ -7,21 +10,17 @@ import '../../cubits/auth/auth_state.dart';
 import '../../cubits/session/session_cubit.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/auth_scaffold.dart';
-import 'confirm_signup_page.dart';
-import 'login_page.dart';
-import 'reset_password_page.dart';
 
 class ForgotPasswordPage extends StatefulWidget {
   const ForgotPasswordPage({super.key, this.email});
 
   final String? email;
 
-  static Route<void> route({String? email}) => MaterialPageRoute(
-    builder: (ctx) => BlocProvider(
-      create: (_) =>
-          AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
-      child: ForgotPasswordPage(email: email),
-    ),
+  /// The page wrapped with its own [AuthCubit].
+  static Widget provided({String? email}) => BlocProvider(
+    create: (ctx) =>
+        AuthCubit(ctx.read<AuthService>(), ctx.read<SessionCubit>()),
+    child: ForgotPasswordPage(email: email),
   );
 
   @override
@@ -49,7 +48,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
       switch (state) {
         case AuthResetCodeSent(:final email, :final message):
           showSnack(context, message);
-          Navigator.of(context).pushReplacement(ResetPasswordPage.route(email));
+          context.go(Routes.resetPasswordPage(email));
         case AuthError(:final code, :final message):
           if (code != 'validation_error') showSnack(context, message);
         default:
@@ -61,7 +60,6 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
       return AuthScaffold(
         title: 'Reset your password',
         subtitle: "We'll email you a code",
-        showBack: true,
         children: [
           Form(
             key: _formKey,
@@ -81,10 +79,10 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
             Align(
               alignment: Alignment.centerLeft,
               child: TextButton(
-                onPressed: () => Navigator.of(context).push(
-                  ConfirmSignUpPage.route(
+                onPressed: () => context.go(
+                  Routes.verifyPage(
                     emailController.text.trim().toLowerCase(),
-                    sendCodeOnOpen: true,
+                    resend: true,
                   ),
                 ),
                 child: const Text('Verify email'),
@@ -97,8 +95,9 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
           ),
           const SizedBox(height: 8),
           TextButton(
-            onPressed: () => Navigator.of(context)
-                .pushReplacement(LoginPage.route(email: emailController.text)),
+            onPressed: () => context.go(
+              Routes.signInPage(email: emailController.text.trim()),
+            ),
             child: const Text('Back to sign in'),
           ),
         ],

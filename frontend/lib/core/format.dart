@@ -40,3 +40,10 @@ String formatBytes(int bytes) {
 
 String formatJoined(DateTime d) =>
     'Joined ${DateFormat('MMMM yyyy').format(d)}';
+
+/// "15K views • 1 week ago", the meta line under a video title.
+String viewsAndAge(int views, DateTime createdAt, {DateTime? now}) =>
+    '${formatViews(views)} • ${timeAgo(createdAt, now: now)}';
+
+/// "Oct 8, 2021".
+String formatDate(DateTime d) => DateFormat.yMMMd().format(d.toLocal());
