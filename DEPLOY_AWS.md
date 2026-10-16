@@ -8,7 +8,7 @@ Follow this file top to bottom to deploy the whole system to AWS with the
 3. the Flutter web app as an **ECS service** (`frontend/terraform`),
 
 Then run an integration test against the live system. The result is the
-**frontend URL**.
+**frontend URL**. §11 tears all of it down again when the user asks.
 
 Everything is Terraform plus a few `docker` / `flutter` commands. The steps are
 safe to re-run: if something fails half-way, fix it and continue from the
@@ -48,6 +48,8 @@ therefore sees one origin, which gives three properties:
   - After that, apply without asking again, unless a plan wants to
     **destroy or replace** something that already exists. In that case, stop
     and ask.
+- **Teardown (§11) needs its own confirmation** (§11.2), even if the user
+  approved the deploy.
 - **Never print secrets.** That includes the Cognito client secret, the DB
   secret value, and `terraform output cognito_user_pool_client_secret`.
 - **Don't commit.**
@@ -60,7 +62,16 @@ therefore sees one origin, which gives three properties:
 - **Keep a log.** Append what you did and each output to
   `deploy-artifacts/deploy-log.md` as you go.
 - **Expect long waits.** The first deployment takes about **35–60 minutes**,
-  mostly waiting on RDS, CloudFront and ElastiCache.
+  mostly waiting on RDS, CloudFront and ElastiCache. A single stack's
+  `terraform apply` (including a destroy) can run 10–25 minutes. That is
+  longer than the Bash tool's 10-minute limit.
+  - Start every `terraform apply` with the Bash tool's
+    `run_in_background: true`, and wait for the completion notice before the
+    next step.
+  - Never kill a running `terraform`: that leaves a stale lock and a state
+    that disagrees with AWS.
+  - If a shell died anyway, check `pgrep -fl terraform` and
+    `terraform state list` before re-running.
 
 ---
 
@@ -488,7 +499,7 @@ Playback CDN:  https://<cloudfront_domain_name>
 Region / account: <region> / <account>
 Images: backend <BACKEND_TAG>, frontend <FRONTEND_TAG>, transcoder latest
 Integration test: PASSED n/n (deploy-artifacts/smoke-report.json)
-Teardown: see DEPLOY_AWS.md §10
+Teardown: see DEPLOY_AWS.md §11
 ```
 
 Get the values with:
@@ -536,12 +547,12 @@ While deployed, these resources bill continuously:
 - small S3 and CloudFront charges.
 
 ElastiCache, RDS and the ALB dominate. Expect tens to a few hundred USD per
-month, so tear it down when the user is done (§10). The transcoder only
+month, so tear it down when the user is done (§11). The transcoder only
 bills per upload.
 
 ---
 
-## 10. Updating and teardown
+## 10. Updating
 
 **Ship new code.** Rebuild, push a **new** tag, and apply with it. A reused
 tag doesn't change the task definition, so nothing restarts.
@@ -552,30 +563,538 @@ tag doesn't change the task definition, so nothing restarts.
 | Frontend | §5.1 build → `docker buildx build ... -t $ECR_URL:<tag> --push .` → `terraform -chdir=frontend/terraform apply -var image_tag=<tag>` |
 | Transcoder | §3 (ECS pulls `:latest` on the next upload) |
 
-**Teardown.** Only do this when the user asks, and confirm first. Run the
-stacks in reverse order:
+---
+
+## 11. Teardown
+
+Removes **everything** the runbook created, across all three stacks. Only do
+this when the user asks for it, and only after the confirmation in §11.2.
+Approval to deploy does not cover this.
+
+**What is permanently deleted:**
+- every uploaded and transcoded video (both S3 buckets are `force_destroy`);
+- the thumbnails bucket;
+- the Cognito user pool, so every account is gone;
+- the ElastiCache progress cache;
+- the SQS queues;
+- all ECR images;
+- the CloudWatch logs.
+
+**What survives:**
+- The RDS final snapshot `video-backend-final`. Terraform always takes it
+  before deleting the database. It holds the users and videos tables. The
+  user chooses in §11.2 whether to keep it or delete it.
+- Local files: the empty Terraform state files, the `terraform.tfvars`
+  files and `deploy-artifacts/`. See §11.8.
+
+**Order: frontend → backend → pipeline.** This is the reverse of
+deployment, and it is mandatory. The frontend stack reads the backend's and
+the pipeline's state, and the backend reads the pipeline's. The backend's RDS
+instance, security groups and Express Mode ALB all live in the pipeline's VPC.
+
+**What would block a plain `terraform destroy`:**
+
+| Blocker | Handled in |
+|---|---|
+| RDS `deletion_protection` (on by default) | §11.4: a targeted apply turns it off first |
+| A snapshot named `video-backend-final` already exists from an earlier teardown | §11.1 check, §11.2 question |
+| The backend and transcoder ECR repos aren't force-deleted, so they must be empty | §11.4, §11.5 (`empty_ecr`) |
+| Transcoder tasks still running in the pipeline cluster | §11.5: stopped first |
+| Express Mode removes its managed ALB, target groups and security group asynchronously, and they sit in the pipeline's VPC | §11.5: wait until the VPC is clear |
+| Cognito `deletion_protection = ACTIVE`, if someone set it | §11.1 check, §11.5 |
+| Container Insights log groups aren't managed by Terraform | §11.6 |
+
+**Duration:** about 30–50 minutes. Most of it is the two CloudFront
+distributions, RDS (which also writes the final snapshot), ElastiCache and
+Express Mode draining. Run every `terraform apply` below in the background
+(§0) and wait for it to exit.
+
+### 11.1 Preflight and inventory
+
+Each Bash call is a fresh shell, so the helpers go in a file that later
+steps source:
 
 ```bash
 source deploy-artifacts/env.sh
+cat > deploy-artifacts/teardown-lib.sh <<'EOF'
+# Helpers for DEPLOY_AWS.md §11. Source after env.sh.
 
-# 1. Frontend
-terraform -chdir=frontend/terraform destroy -input=false -var "image_tag=$FRONTEND_TAG"
+# A variable's effective value in a stack (tfvars, else default).
+tfvar() { echo "var.$2" | terraform -chdir="$1" console 2>/dev/null | tr -d '"'; }
 
-# 2. Backend. RDS has deletion protection, so turn it off first. The destroy
-#    keeps a final snapshot named video-backend-final; it holds all users and videos.
-terraform -chdir=backend/terraform apply   -input=false -var "image_tag=$BACKEND_TAG" -var db_deletion_protection=false
-aws ecr batch-delete-image --repository-name video-backend \
-  --image-ids "$(aws ecr list-images --repository-name video-backend --query 'imageIds[*]' --output json)" || true
-terraform -chdir=backend/terraform destroy -input=false -var "image_tag=$BACKEND_TAG" -var db_deletion_protection=false
+# Resources in a stack's state (0 when it has none).
+state_count() { terraform -chdir="$1" state list 2>/dev/null | wc -l | tr -d ' '; }
 
-# 3. Pipeline (the ECR repo isn't force-deleted)
-REPO="$(terraform -chdir=IAC/terraform output -raw ecr_repository_url)"; REPO="${REPO##*/}"
-aws ecr batch-delete-image --repository-name "$REPO" \
-  --image-ids "$(aws ecr list-images --repository-name "$REPO" --query 'imageIds[*]' --output json)" || true
-terraform -chdir=IAC/terraform destroy -input=false
+# Delete every image in an ECR repo so Terraform can delete the repo.
+# Image indexes go before the manifests they reference, hence the rounds.
+empty_ecr() {
+  local repo="$1" ids n=0
+  [ -n "$repo" ] || return 0
+  while [ "$n" -lt 20 ]; do
+    if ! ids="$(aws ecr list-images --repository-name "$repo" --max-items 100 \
+                  --query 'imageIds' --output json 2>&1)"; then
+      if grep -q RepositoryNotFound <<<"$ids"; then echo "ECR $repo: gone"; return 0; fi
+      echo "$ids" >&2; return 1
+    fi
+    if [ -z "$ids" ] || [ "$ids" = "[]" ]; then echo "ECR $repo: empty"; return 0; fi
+    aws ecr batch-delete-image --repository-name "$repo" --image-ids "$ids" \
+      --query '{deleted: length(imageIds), failed: length(failures)}' --output text
+    n=$((n + 1))
+  done
+  echo "ECR $repo still has images after $n rounds" >&2
+  return 1
+}
+
+# Wait (up to 9 minutes) until no load balancer and no ELB/ECS-task ENI is
+# left in the VPC. ElastiCache's ENIs are expected; Terraform removes them.
+wait_vpc_clear() {
+  local vpc="$1" i lbs enis
+  [ -n "$vpc" ] || return 0
+  for i in $(seq 1 18); do
+    lbs="$(aws elbv2 describe-load-balancers \
+             --query "length(LoadBalancers[?VpcId=='$vpc'])" --output text)"
+    enis="$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$vpc" \
+             --query "length(NetworkInterfaces[?starts_with(not_null(Description,''),'ELB ') || starts_with(not_null(Description,''),'arn:aws:ecs:')])" \
+             --output text)"
+    echo "$(date +%T) load balancers=$lbs ELB/ECS ENIs=$enis"
+    if [ "$lbs" = 0 ] && [ "$enis" = 0 ]; then return 0; fi
+    sleep 30
+  done
+  return 1
+}
+
+# gone <label> <id> <describe command...>: passes when AWS says not found.
+gone() {
+  local label="$1" id="$2" out; shift 2
+  if [ -z "$id" ]; then echo "skip     $label (never created)"; return; fi
+  if out="$("$@" 2>&1)"; then echo "LEFT     $label ($id)"; return; fi
+  if grep -qiE 'not ?found|does not exist|nonexistent|NoSuch|\(404\)' <<<"$out"; then
+    echo "gone     $label"
+  else
+    echo "CHECK    $label ($id): $(head -n1 <<<"$out")"
+  fi
+}
+
+# none <label> <list command...>: passes when the query prints nothing.
+none() {
+  local label="$1" out; shift
+  out="$("$@" 2>&1)"
+  case "$out" in
+    ""|None|"[]"|0) echo "gone     $label" ;;
+    *) echo "LEFT     $label: $(tr '\n' ' ' <<<"$out")" ;;
+  esac
+}
+EOF
+echo ok
 ```
 
-Afterwards, tell the user that the `video-backend-final` RDS snapshot still
-exists. They can delete it with
-`aws rds delete-db-snapshot --db-snapshot-identifier video-backend-final`
-when it's no longer needed.
+Check that the account is the one that was deployed to, and initialise the
+three stacks. In a fresh clone `.terraform/` is missing, but the state files
+are not:
+
+```bash
+source deploy-artifacts/env.sh
+[ "$(aws sts get-caller-identity --query Account --output text)" = "$ACCOUNT_ID" ] \
+  && echo "account OK: $ACCOUNT_ID ($AWS_REGION)" || echo "STOP: default profile is a different account"
+for d in frontend/terraform backend/terraform IAC/terraform; do
+  terraform -chdir=$d init -input=false >/dev/null && echo "init $d"
+done
+```
+
+If the account differs, or a stack's `terraform.tfstate` is missing, stop
+and tell the user. Don't delete resources by hand from guesses.
+
+**Record what exists, before any state is destroyed.** The verification in
+§11.7 needs these names after the outputs are gone. Keep an existing
+`teardown-ids.sh`: a re-run after a partial teardown must not overwrite it
+with empty values.
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-lib.sh
+for d in frontend/terraform backend/terraform IAC/terraform; do
+  echo "## $d: $(state_count $d) resources"; terraform -chdir=$d state list 2>/dev/null
+done > deploy-artifacts/teardown-inventory.txt
+grep '^##' deploy-artifacts/teardown-inventory.txt
+
+if [ ! -s deploy-artifacts/teardown-ids.sh ]; then
+  out()  { terraform -chdir="$1" output -raw "$2" 2>/dev/null; }
+  repo() { out "$1" ecr_repository_url | sed 's#.*/##'; }
+  THUMBS_DOMAIN="$(out backend/terraform thumbnails_cdn_domain)"
+  THUMBS_CDN_ID=""
+  [ -n "$THUMBS_DOMAIN" ] && THUMBS_CDN_ID="$(aws cloudfront list-distributions \
+    --query "DistributionList.Items[?DomainName=='$THUMBS_DOMAIN'].Id | [0]" --output text)"
+  DB_INSTANCE="$(tfvar backend/terraform backend_name)"
+  {
+    echo "# Captured by DEPLOY_AWS.md §11.1 before teardown. Do not edit."
+    echo "export PROJECT_NAME=$(tfvar IAC/terraform project_name)"
+    echo "export VPC_ID=$(out IAC/terraform vpc_id)"
+    echo "export PIPELINE_CLUSTER=$(out IAC/terraform ecs_cluster)"
+    echo "export TRANSCODER_REPO=$(repo IAC/terraform)"
+    echo "export TRANSCODER_LOG_GROUP=/ecs/$(tfvar IAC/terraform ecs_task_family)"
+    echo "export RAW_BUCKET=$(out IAC/terraform raw_bucket)"
+    echo "export PROCESSED_BUCKET=$(out IAC/terraform processed_bucket)"
+    echo "export QUEUE_URLS='$(out IAC/terraform ingest_queue_url) $(out IAC/terraform ingest_dlq_url) $(out IAC/terraform completion_queue_url) $(out IAC/terraform completion_dlq_url)'"
+    echo "export LAMBDA_NAME=$(out IAC/terraform lambda_function_name)"
+    echo "export USER_POOL_ID=$(out IAC/terraform cognito_user_pool_id)"
+    echo "export REDIS_NAME=$(tfvar IAC/terraform redis_cache_name)"
+    echo "export VIDEO_CDN_ID=$(out IAC/terraform cloudfront_distribution_id)"
+    echo "export BACKEND_CLUSTER=$(out backend/terraform ecs_cluster)"
+    echo "export BACKEND_REPO=$(repo backend/terraform)"
+    echo "export BACKEND_LOG_GROUP=$(out backend/terraform log_group)"
+    echo "export THUMBS_BUCKET=$(out backend/terraform thumbnails_bucket)"
+    echo "export THUMBS_CDN_ID=${THUMBS_CDN_ID/None/}"
+    echo "export DB_INSTANCE=$DB_INSTANCE"
+    echo "export DB_FINAL_SNAPSHOT=$DB_INSTANCE-final"
+    echo "export FRONTEND_REPO=$(repo frontend/terraform)"
+    echo "export FRONTEND_LOG_GROUP=$(out frontend/terraform log_group)"
+    echo "export FRONTEND_URL_WAS=$(out frontend/terraform frontend_url)"
+  } > deploy-artifacts/teardown-ids.sh
+fi
+cat deploy-artifacts/teardown-ids.sh
+```
+
+**Checks that decide what to ask in §11.2:**
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+# 1. A final snapshot from an earlier teardown blocks the RDS delete.
+aws rds describe-db-snapshots --db-snapshot-identifier "$DB_FINAL_SNAPSHOT" \
+  --query 'DBSnapshots[0].[DBSnapshotIdentifier,SnapshotCreateTime,Status]' --output text 2>/dev/null \
+  || echo "no existing $DB_FINAL_SNAPSHOT snapshot"
+# 2. Cognito deletion protection (INACTIVE unless someone changed it).
+[ -n "$USER_POOL_ID" ] && aws cognito-idp describe-user-pool --user-pool-id "$USER_POOL_ID" \
+  --query 'UserPool.DeletionProtection' --output text
+# 3. Transcodes in flight (they would be cut off).
+[ -n "$PIPELINE_CLUSTER" ] && aws ecs list-tasks --cluster "$PIPELINE_CLUSTER" \
+  --desired-status RUNNING --query 'length(taskArns)' --output text
+# 4. How much video data is about to be deleted.
+for b in "$RAW_BUCKET" "$PROCESSED_BUCKET" "$THUMBS_BUCKET"; do
+  [ -n "$b" ] && echo "$b: $(aws s3 ls "s3://$b" --recursive --summarize 2>/dev/null | grep -E 'Total (Objects|Size)' | tr '\n' ' ')"
+done
+```
+
+### 11.2 Ask the user
+
+Ask **once**, in a single message, and wait for an explicit yes. Show:
+
+1. The account ID, the region, and the resource count per stack from
+   `teardown-inventory.txt`.
+2. The frontend URL that will stop working (`FRONTEND_URL_WAS`).
+3. That **all videos, thumbnails and user accounts are deleted permanently**,
+   with the object counts and sizes from check 4.
+4. If check 3 found running transcoder tasks: say they will be stopped.
+5. If check 2 says `ACTIVE`: say you will set Cognito deletion protection to
+   `INACTIVE` first.
+6. **The RDS snapshot.** Ask them to choose:
+   - **Keep `video-backend-final`** (default). It allows a restore later and
+     costs a small amount of snapshot storage each month.
+   - **Delete it** after the teardown, so nothing is left.
+
+   If check 1 found an existing snapshot, also ask them to choose:
+   - **Rename it:** copy it to `video-backend-final-<its date>`, then delete
+     the original.
+   - **Delete it.**
+
+   Either way, the new final snapshot can then be created.
+7. Roughly 30–50 minutes.
+
+If they decline, stop. Nothing has been changed yet.
+
+Record the answers in `deploy-artifacts/deploy-log.md`. If check 1 found a
+snapshot, deal with it now as the user chose:
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+# Rename = copy + delete (skip the copy if the user chose delete):
+OLD_DATE="$(aws rds describe-db-snapshots --db-snapshot-identifier "$DB_FINAL_SNAPSHOT" \
+  --query 'DBSnapshots[0].SnapshotCreateTime' --output text | cut -c1-10)"
+aws rds copy-db-snapshot --source-db-snapshot-identifier "$DB_FINAL_SNAPSHOT" \
+  --target-db-snapshot-identifier "$DB_FINAL_SNAPSHOT-$OLD_DATE" --query 'DBSnapshot.Status'
+aws rds wait db-snapshot-available --db-snapshot-identifier "$DB_FINAL_SNAPSHOT-$OLD_DATE"
+# Then, for both choices:
+aws rds delete-db-snapshot --db-snapshot-identifier "$DB_FINAL_SNAPSHOT" --query 'DBSnapshot.Status'
+aws rds wait db-snapshot-deleted --db-snapshot-identifier "$DB_FINAL_SNAPSHOT"
+```
+
+### 11.3 Frontend stack
+
+Skip this step if `state_count frontend/terraform` is `0`. Its ECR repo is
+`force_delete`, so its images go with it.
+
+```bash
+source deploy-artifacts/env.sh
+cd frontend/terraform
+terraform plan -destroy -input=false -out=destroy.tfplan \
+  | tee "$REPO_ROOT/deploy-artifacts/destroy-frontend.txt" | tail -3
+```
+
+The last line must say `0 to add, 0 to change, N to destroy`. Then run in
+the background:
+
+```bash
+source deploy-artifacts/env.sh
+cd frontend/terraform
+terraform apply -input=false destroy.tfplan 2>&1 | tee -a "$REPO_ROOT/deploy-artifacts/destroy-frontend.txt" | tail -5
+echo "left in state: $(terraform state list | wc -l)"     # 0
+```
+
+This takes about 5–10 minutes while Express Mode drains the service. The
+shared ALB stays up, because the API still uses it.
+
+### 11.4 Backend stack
+
+Skip this step if `state_count backend/terraform` is `0`.
+
+**Lift RDS deletion protection.** This is a targeted apply. The plan must
+change only `aws_db_instance.main` in place (`0 to add, 1 to change, 0 to
+destroy`), or show no changes if protection is already off. If it shows
+anything else, stop and ask.
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+cd backend/terraform
+terraform plan -input=false -target=aws_db_instance.main -var db_deletion_protection=false \
+  -out=unprotect.tfplan | tail -3
+terraform apply -input=false unprotect.tfplan | tail -2
+aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
+  --query 'DBInstances[0].DeletionProtection'                             # false
+```
+
+The `-target` warning Terraform prints is expected.
+
+**Empty the backend's ECR repo, then plan the destroy:**
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+source deploy-artifacts/teardown-lib.sh
+empty_ecr "$BACKEND_REPO"
+cd backend/terraform
+terraform plan -destroy -input=false -var db_deletion_protection=false -out=destroy.tfplan \
+  | tee "$REPO_ROOT/deploy-artifacts/destroy-backend.txt" | tail -3
+```
+
+Then apply it in the background. It takes 15–25 minutes:
+- the thumbnails CloudFront distribution is disabled, then deleted;
+- RDS writes `video-backend-final`, then deletes the instance;
+- both ECS services drain.
+
+```bash
+source deploy-artifacts/env.sh
+cd backend/terraform
+terraform apply -input=false destroy.tfplan 2>&1 | tee -a "$REPO_ROOT/deploy-artifacts/destroy-backend.txt" | tail -5
+echo "left in state: $(terraform state list | wc -l)"     # 0
+```
+
+### 11.5 Pipeline stack
+
+Skip this step if `state_count IAC/terraform` is `0`.
+
+**Stop in-flight transcodes.** A running task blocks deleting the cluster.
+Also empty the transcoder repo, and wait until Express Mode has removed its
+ALB from the VPC:
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+source deploy-artifacts/teardown-lib.sh
+for t in $(aws ecs list-tasks --cluster "$PIPELINE_CLUSTER" --desired-status RUNNING \
+             --query 'taskArns[]' --output text 2>/dev/null); do
+  aws ecs stop-task --cluster "$PIPELINE_CLUSTER" --task "$t" --reason teardown --query 'task.lastStatus'
+done
+empty_ecr "$TRANSCODER_REPO"
+wait_vpc_clear "$VPC_ID" && echo "VPC clear" || echo "VPC NOT clear yet"
+```
+
+If it says `NOT clear`, run only `wait_vpc_clear` again (each run waits up
+to 9 minutes). If a load balancer is still there 20 minutes after §11.4,
+§11.10 says how to remove it.
+
+**If check 2 in §11.1 was `ACTIVE`**, turn Cognito deletion protection off
+first with a targeted apply. The plan must show only the user pool changing
+in place:
+
+```bash
+source deploy-artifacts/env.sh
+cd IAC/terraform
+terraform plan -input=false -target=aws_cognito_user_pool.this \
+  -var cognito_deletion_protection=INACTIVE -out=unprotect.tfplan | tail -3
+terraform apply -input=false unprotect.tfplan | tail -2
+```
+
+**Destroy.** Plan it:
+
+```bash
+source deploy-artifacts/env.sh
+cd IAC/terraform
+terraform plan -destroy -input=false -out=destroy.tfplan \
+  | tee "$REPO_ROOT/deploy-artifacts/destroy-pipeline.txt" | tail -3
+```
+
+Then apply it in the background. It takes 10–20 minutes:
+- the playback CloudFront distribution;
+- ElastiCache Serverless;
+- the S3 buckets, which are emptied by `force_destroy`. This is slow when
+  they hold many objects.
+
+```bash
+source deploy-artifacts/env.sh
+cd IAC/terraform
+terraform apply -input=false destroy.tfplan 2>&1 | tee -a "$REPO_ROOT/deploy-artifacts/destroy-pipeline.txt" | tail -5
+echo "left in state: $(terraform state list | wc -l)"     # 0
+```
+
+### 11.6 Leftovers outside Terraform
+
+ECS creates Container Insights log groups for both clusters, and Terraform
+doesn't track them. Also remove any of the stacks' log groups that something
+re-created after Terraform deleted them, such as a late Lambda invocation:
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+for c in "$BACKEND_CLUSTER" "$PIPELINE_CLUSTER"; do
+  [ -n "$c" ] || continue
+  for g in $(aws logs describe-log-groups --log-group-name-prefix "/aws/ecs/containerinsights/$c/" \
+               --query 'logGroups[].logGroupName' --output text); do
+    aws logs delete-log-group --log-group-name "$g" && echo "deleted $g"
+  done
+done
+for g in "$BACKEND_LOG_GROUP" "$FRONTEND_LOG_GROUP" "$TRANSCODER_LOG_GROUP" "/aws/lambda/$LAMBDA_NAME"; do
+  aws logs delete-log-group --log-group-name "$g" 2>/dev/null && echo "deleted $g"
+done
+true
+```
+
+**If the user chose to delete the final snapshot:**
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+aws rds wait db-snapshot-available --db-snapshot-identifier "$DB_FINAL_SNAPSHOT"
+aws rds delete-db-snapshot --db-snapshot-identifier "$DB_FINAL_SNAPSHOT" --query 'DBSnapshot.Status'
+```
+
+### 11.7 Verify that nothing is left
+
+Every line should read `gone` or `skip`. The only exceptions are the final
+snapshot, if the user kept it, and the Terraform state counts, which must be
+`0`.
+
+```bash
+source deploy-artifacts/env.sh
+source deploy-artifacts/teardown-ids.sh
+source deploy-artifacts/teardown-lib.sh
+{
+for d in frontend/terraform backend/terraform IAC/terraform; do
+  echo "state    $d: $(state_count $d) resources"
+done
+echo "-- compute and networking"
+none "ECS clusters (ACTIVE)" aws ecs describe-clusters --clusters "${BACKEND_CLUSTER:-none}" "${PIPELINE_CLUSTER:-none}" \
+       --query "clusters[?status=='ACTIVE'].clusterName" --output text
+gone "VPC"                   "$VPC_ID" aws ec2 describe-vpcs --vpc-ids "$VPC_ID"
+none "load balancers in VPC" aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerName" --output text
+none "target groups in VPC"  aws elbv2 describe-target-groups  --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupName" --output text
+none "ECS autoscaling targets" aws application-autoscaling describe-scalable-targets --service-namespace ecs \
+       --query "ScalableTargets[?contains(ResourceId,'/${BACKEND_CLUSTER:-none}/')].ResourceId" --output text
+gone "Lambda"                "$LAMBDA_NAME" aws lambda get-function --function-name "$LAMBDA_NAME"
+echo "-- data"
+gone "RDS instance"          "$DB_INSTANCE" aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE"
+gone "ElastiCache"           "$REDIS_NAME" aws elasticache describe-serverless-caches --serverless-cache-name "$REDIS_NAME"
+for b in "$RAW_BUCKET" "$PROCESSED_BUCKET" "$THUMBS_BUCKET"; do
+  gone "S3 $b" "$b" aws s3api head-bucket --bucket "$b"
+done
+for q in $QUEUE_URLS; do
+  gone "SQS ${q##*/}" "$q" aws sqs get-queue-attributes --queue-url "$q" --attribute-names QueueArn
+done
+gone "Cognito user pool"     "$USER_POOL_ID" aws cognito-idp describe-user-pool --user-pool-id "$USER_POOL_ID"
+gone "SSM client secret"     "$PROJECT_NAME" aws ssm get-parameter --name "/$PROJECT_NAME/cognito/client-secret"
+echo "-- delivery and images"
+gone "CloudFront playback"   "$VIDEO_CDN_ID"  aws cloudfront get-distribution --id "$VIDEO_CDN_ID"
+gone "CloudFront thumbnails" "$THUMBS_CDN_ID" aws cloudfront get-distribution --id "$THUMBS_CDN_ID"
+for r in "$FRONTEND_REPO" "$BACKEND_REPO" "$TRANSCODER_REPO"; do
+  gone "ECR $r" "$r" aws ecr describe-repositories --repository-names "$r"
+done
+echo "-- logs"
+for g in "$BACKEND_LOG_GROUP" "$FRONTEND_LOG_GROUP" "$TRANSCODER_LOG_GROUP" "/aws/lambda/$LAMBDA_NAME" \
+         "/aws/ecs/containerinsights/$BACKEND_CLUSTER/" "/aws/ecs/containerinsights/$PIPELINE_CLUSTER/"; do
+  none "log group $g" aws logs describe-log-groups --log-group-name-prefix "$g" --query 'logGroups[].logGroupName' --output text
+done
+echo "-- kept on purpose (if the user chose to keep it)"
+gone "RDS snapshot $DB_FINAL_SNAPSHOT" "$DB_FINAL_SNAPSHOT" aws rds describe-db-snapshots --db-snapshot-identifier "$DB_FINAL_SNAPSHOT"
+echo "-- anything else still tagged Project=$PROJECT_NAME (tag index can lag by minutes)"
+for r in "$AWS_REGION" us-east-1; do
+  none "tagged in $r" aws resourcegroupstaggingapi get-resources --region "$r" \
+         --tag-filters "Key=Project,Values=$PROJECT_NAME" --query 'ResourceTagMappingList[].ResourceARN' --output text
+done
+} 2>&1 | tee deploy-artifacts/teardown-verify.txt
+```
+
+How to read the result:
+- **`LEFT`:** a real leftover. Use §11.10, then run the verification again.
+- **`CHECK`:** an error that wasn't "not found", usually `AccessDenied`.
+  Report it as unverified; don't call it gone.
+- **Tag-index entries:** if the matching resource checks above say `gone`,
+  wait a few minutes and run the verification again before reporting them.
+- **The kept snapshot** shows as `LEFT … RDS snapshot`. That is expected
+  when the user chose to keep it.
+
+### 11.8 Local clean-up
+
+Leave these in place unless the user asks otherwise:
+- The emptied `terraform.tfstate*` files and the `terraform.tfvars` files,
+  so a redeploy reuses the same names.
+- `deploy-artifacts/`. It has the logs, plans and verification output.
+  `env.sh` keeps a redeploy on the same bucket names.
+
+Remove only the plan files and the local copies of the pushed images:
+
+```bash
+source deploy-artifacts/env.sh
+rm -f frontend/terraform/*.tfplan backend/terraform/*.tfplan IAC/terraform/*.tfplan \
+      frontend/terraform/tfplan backend/terraform/tfplan IAC/terraform/tfplan
+docker images --format '{{.Repository}}:{{.Tag}}' \
+  | grep -E "^$ACCOUNT_ID\.dkr\.ecr\.$AWS_REGION\.amazonaws\.com/" \
+  | xargs -r docker rmi >/dev/null && echo "local ECR images removed"
+git status --short     # nothing new should be tracked
+```
+
+### 11.9 Report back to the user
+
+Save this as `deploy-artifacts/teardown-summary.md` and show it:
+
+```
+Teardown: COMPLETE | INCOMPLETE
+Region / account: <region> / <account>
+Destroyed: frontend <n>, backend <n>, pipeline <n> Terraform resources
+           (+ <k> Container Insights log groups)
+Frontend URL <FRONTEND_URL_WAS> no longer resolves.
+Verification: <n> gone, <n> LEFT, <n> CHECK  (deploy-artifacts/teardown-verify.txt)
+Kept: RDS snapshot video-backend-final (delete with
+      aws rds delete-db-snapshot --db-snapshot-identifier video-backend-final)
+      | nothing
+Still billing: nothing | <each LEFT item>
+Redeploy: DEPLOY_AWS.md from §2 (deploy-artifacts/env.sh is kept)
+```
+
+Only report `COMPLETE` when every Terraform state is at `0` and nothing is
+`LEFT` except the kept snapshot.
+
+### 11.10 Teardown troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `InvalidParameterCombination: Cannot delete protected DB Instance` | §11.4's targeted apply didn't run, or didn't apply. Re-run it, then re-plan the destroy |
+| `DBSnapshotAlreadyExists` | §11.1 check 1 was skipped. Handle the old snapshot per §11.2, then `terraform apply` a fresh `plan -destroy` |
+| `RepositoryNotEmptyException` | `empty_ecr <repo>`, then re-plan and apply the destroy |
+| Deleting the ECS cluster fails with `ClusterContainsTasksException` or `...ServicesException` | Stop the tasks (§11.5). For the backend, check that `aws ecs list-services --cluster video-backend` is empty, then wait a minute |
+| Subnet, security group or VPC `DependencyViolation` | Something still has an ENI in the VPC: `aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=$VPC_ID --query 'NetworkInterfaces[].[NetworkInterfaceId,Description,Status]' --output table`. ELB or ECS ENIs: wait (`wait_vpc_clear`). Then re-plan and apply the destroy |
+| An Express Mode ALB is still in the VPC 20 minutes after both services are gone | Show it to the user, and ask before deleting it, because Terraform didn't create it. Get its ARN and tags with `aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC_ID']"` (expect `AmazonECSManaged`). Then: `aws elbv2 delete-load-balancer --load-balancer-arn <arn>`, then its target groups (`aws elbv2 describe-target-groups --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn"` → `delete-target-group`), then, after `wait_vpc_clear`, its security group (`aws ec2 describe-security-groups --filters Name=vpc-id,Values=$VPC_ID`; leave the `default` group) |
+| CloudFront delete times out or fails with `DistributionNotDisabled` | The disable is still propagating. Wait until `aws cloudfront get-distribution --id <id> --query Distribution.Status` is `Deployed`, then re-plan and apply the destroy |
+| `Error acquiring the state lock` after a killed shell | Make sure no `terraform` process is still running (`pgrep -fl terraform`), then `terraform force-unlock <id>` in that stack |
+| A destroy stopped half-way | Safe to repeat: re-run that stack's `plan -destroy` and apply. State only lists what's left. Don't move on to the next stack until this one is at `0` |
+| A stack's state is empty but AWS still has its resources (state lost) | Stop. Show the user the §11.7 output and ask. Remove resources by hand only with their approval, one at a time |

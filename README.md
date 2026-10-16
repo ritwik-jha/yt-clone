@@ -154,7 +154,8 @@ as the username (`username_attributes = ["email"]`), matching how
 **All three stacks in one go:** `DEPLOY_AWS.md` is a runbook (written for a
 local Claude Code session, readable by anyone). It deploys the pipeline, the
 backend, and the web app on ECS with the `default` AWS profile, then runs
-`scripts/deploy_smoke_test.py` against the live URL.
+`scripts/deploy_smoke_test.py` against the live URL. Its §11 tears every
+stack down again and verifies nothing is left.
 
 Pipeline infrastructure:
 
