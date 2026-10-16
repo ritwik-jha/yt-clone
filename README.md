@@ -36,6 +36,10 @@ The client is a Flutter web app (dark, YouTube-style, from the Figma
 │   └── AGENTS.md
 │
 ├── frontend/                      Flutter web app: lib/, web/, test/, integration_test/
+│   ├── deploy/                    nginx image: serves the app, proxies the API (same origin)
+│   └── terraform/                 the app as an ECS Express Mode service
+│
+├── DEPLOY_AWS.md                  End-to-end AWS deploy + live integration test (runbook)
 │
 └── docs/                          Specs and design guides (see "Design docs" below)
 ```
@@ -146,6 +150,11 @@ as the username (`username_attributes = ["email"]`), matching how
 ---
 
 ## Getting started
+
+**All three stacks in one go:** `DEPLOY_AWS.md` is a runbook (written for a
+local Claude Code session, readable by anyone). It deploys the pipeline, the
+backend, and the web app on ECS with the `default` AWS profile, then runs
+`scripts/deploy_smoke_test.py` against the live URL.
 
 Pipeline infrastructure:
 

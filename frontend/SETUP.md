@@ -136,6 +136,13 @@ on the backend set `cors_origins = ["https://<app origin>"]`,
 third-party cookies (Safari, Chrome with that setting) won't keep the session
 in this setup, which is why same-origin is the default advice.
 
+**On ECS (same origin, ready-made).** `deploy/Dockerfile` packages the build
+in nginx, and `deploy/nginx.conf.template` forwards `/auth/`, `/video/`,
+`/upload/`, and `/healthz` to the API. `terraform/` runs that image as an ECS
+Express Mode service (HTTPS `*.on.aws` URL) in the backend's cluster. Build
+with `--no-web-resources-cdn` so CanvasKit is served from the container.
+`../DEPLOY_AWS.md` walks through it end to end.
+
 Either way the media CORS is already in place: the raw upload bucket accepts
 browser PUTs from any origin (`IAC/terraform/storage.tf`), the thumbnails
 bucket from `thumbnails_cors_origins`, and both CloudFront distributions add

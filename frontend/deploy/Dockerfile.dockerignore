@@ -1,0 +1,4 @@
+# Build context is frontend/; only the web build and this directory go in.
+*
+!build/web
+!deploy
