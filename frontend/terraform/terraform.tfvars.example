@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars. Apply after IAC/terraform and backend/terraform.
+aws_region    = "ap-south-1"
+frontend_name = "video-frontend"
+
+# Deploy = push a new tag (frontend/deploy/Dockerfile), set it here, apply.
+image_tag = "latest"
+
+min_tasks = 1
+max_tasks = 2

@@ -32,3 +32,16 @@ backend/terraform/*.tfplan
 *.mp4
 .DS_Store
 *.csv
+
+frontend/terraform/.terraform/
+frontend/terraform/.terraform.lock.hcl
+frontend/terraform/terraform.tfstate
+frontend/terraform/terraform.tfstate.*
+frontend/terraform/terraform.tfvars
+frontend/terraform/*.tfplan
+frontend/terraform/tfplan
+IAC/terraform/tfplan
+backend/terraform/tfplan
+
+# DEPLOY_AWS.md session files (env, logs, plans, test report, screenshots)
+deploy-artifacts/
