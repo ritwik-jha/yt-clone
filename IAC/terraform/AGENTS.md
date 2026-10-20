@@ -13,7 +13,7 @@ PostgreSQL) belongs to `../../backend/terraform`, not here.
 | `variables.tf` | Every knob. Two required inputs: `raw_bucket_name`, `processed_bucket_name`. Everything else defaulted. |
 | `network.tf` | `aws_vpc`, N public subnets across N AZs, IGW, public RT + associations, `egress_only` SG (workloads), `redis` SG (6379 from egress SG only) |
 | `storage.tf` | S3 raw + processed buckets (public-access blocked, force_destroy on), CORS on raw, SQS ingest queue + DLQ (redrive), SQS completion queue + DLQ, SQS→S3 send-message policy, `aws_s3_bucket_notification` filter `suffix=.mp4` |
-| `redis.tf` | `aws_elasticache_serverless_cache` (engine=redis, v7), 5 GB / 5000 eCPU limits, in redis SG + module subnets, locals expose `redis_address` / `redis_port` / `redis_uri` |
+| `redis.tf` | `aws_elasticache_serverless_cache` (engine=valkey, v7), 5 GB / 5000 eCPU limits, in redis SG + module subnets, locals expose `redis_address` / `redis_port` / `redis_uri` |
 | `cognito.tf` | User pool (`username_attributes=["email"]`, required `email`/`name` schema) + confidential app client (secret, `USER_PASSWORD_AUTH`, `prevent_user_existence_errors`) + SSM SecureString `/<project>/cognito/client-secret` for the backend API task |
 | `cloudfront.tf` | OAC (sigv4), distribution in front of the processed bucket (managed CachingOptimized + SimpleCORS policies, HTTPS redirect, default cert), processed bucket policy allowing only this distribution |
 | `ecr.tf` | Private ECR repo, scan-on-push, 10-image lifecycle |

@@ -1,5 +1,7 @@
 resource "aws_elasticache_serverless_cache" "progress" {
-  engine = "redis"
+  # Valkey is wire-compatible with the redis client and is billed ~33% lower
+  # than Redis OSS, with a 100 MB minimum instead of 1 GB.
+  engine = "valkey"
   name   = var.redis_cache_name
 
   cache_usage_limits {

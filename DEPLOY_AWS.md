@@ -194,7 +194,7 @@ This stack creates:
 - the SQS queues and their DLQs,
 - the Lambda dispatcher,
 - the ECS cluster and task definition for the transcoder,
-- ElastiCache Redis,
+- ElastiCache Serverless (Valkey, Redis-compatible),
 - the Cognito user pool, and
 - the playback CloudFront distribution.
 
