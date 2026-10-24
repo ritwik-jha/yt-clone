@@ -1,8 +1,8 @@
 """Pydantic request/response models (docs/specs/api-and-db-schema-spec.md)."""
 
 import re
-from datetime import datetime
-from typing import Annotated, Optional
+from datetime import datetime, timezone
+from typing import Annotated, Literal, Optional
 from uuid import UUID
 
 from pydantic import (
@@ -211,3 +211,64 @@ class ProgressResponse(BaseModel):
     video_id: UUID
     percent: int
     status: VideoStatus
+
+
+# ---------- Watch history ----------
+# Longest position or duration the API accepts: one day of video.
+MAX_MEDIA_SECONDS = 86_400
+
+
+class ProgressEntryIn(BaseModel):
+    video_id: UUID
+    position_seconds: int = Field(..., ge=0, le=MAX_MEDIA_SECONDS)
+    duration_seconds: Optional[int] = Field(None, ge=1, le=MAX_MEDIA_SECONDS)
+    # When the browser observed this position. Must carry an offset; the
+    # server keeps the report with the latest observation (routers/history.py).
+    watched_at: datetime
+
+    @field_validator("watched_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("watched_at needs a timezone offset (for example Z)")
+        return value.astimezone(timezone.utc)
+
+
+class RecordProgressRequest(BaseModel):
+    entries: list[ProgressEntryIn] = Field(..., min_length=1, max_length=50)
+
+
+class WatchProgress(BaseModel):
+    video_id: UUID
+    position_seconds: int
+    duration_seconds: Optional[int] = None
+    completed: bool
+    last_watched_at: datetime
+
+
+class ProgressResult(BaseModel):
+    video_id: UUID
+    # saved: stored. stale: the server has a newer observation, in `progress`.
+    # not_found: no such video, or the caller can't watch it. expired:
+    # watched_at is more than 30 days old.
+    result: Literal["saved", "stale", "not_found", "expired"]
+    progress: Optional[WatchProgress] = None
+
+
+class RecordProgressResponse(BaseModel):
+    results: list[ProgressResult]
+
+
+class HistoryItem(BaseModel):
+    video: FeedItem
+    progress: WatchProgress
+
+
+class HistoryResponse(BaseModel):
+    items: list[HistoryItem]
+    # Pass back as `cursor` for the next page; null at the end.
+    next_cursor: Optional[str] = None
+
+
+class PositionsResponse(BaseModel):
+    items: list[WatchProgress]

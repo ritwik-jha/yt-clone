@@ -30,18 +30,21 @@ backend/
 │   ├── config.py               pydantic-settings; env first, then .env
 │   ├── clients.py              lazy singletons: cognito, s3, sqs, redis
 │   ├── db.py                   engine + sessions; password from DB_PASSWORD or the RDS secret
-│   ├── models.py               users + videos + transcode_results ORM models, enums
+│   ├── models.py               users + videos + transcode_results + watch_history ORM models, enums
 │   ├── users.py                upsert_user, shared by signup and get_current_user
 │   ├── cache.py                video:meta:<id> Redis hash cache for GET /video/{id}
 │   ├── crypto.py               HMAC-SHA256 secret_hash for Cognito app clients
 │   ├── deps.py                 get_identity / get_optional_identity / get_current_user
 │   ├── errors.py               APIError: HTTPException carrying a stable `code`
 │   ├── schemas.py              pydantic request/response models
+│   ├── video_views.py          FeedItem from a row, URL builders, viewable_by (shared by routers)
+│   ├── watch_progress.py       history rules + SQL builders (completion, cursor, upsert); no clients
 │   ├── routers/
 │   │   ├── auth.py             /auth/{signup,verify-otp,resend-otp,forgot-password,
 │   │   │                         reset-password,login,refresh,logout,me}
 │   │   ├── upload.py           /upload/video/{url, url/thumbnail, save}
-│   │   └── video.py            /video/{feed, mine, {id}, {id}/progress, {id}/view}
+│   │   ├── video.py            /video/{feed, mine, {id}, {id}/progress, {id}/view}
+│   │   └── history.py          /history, /history/{progress, positions, {video_id}}
 │   └── workers/
 │       └── completion_poller.py  SQS -> PostgreSQL drainer (its own container)
 ├── migrations/                 Alembic env.py + versions/ (schema source of truth)
@@ -83,6 +86,11 @@ backend/
 | DELETE | `/video/{video_id}` | cookie, owner | Delete the row (204), drop the `video:meta` key, then remove the S3 objects in the background |
 | GET  | `/video/{video_id}/progress` | optional | Redis `GET video:progress:<stem of s3_key>` + row status |
 | POST | `/video/{video_id}/view` | optional | Atomic `views_count + 1` (204); 409 `video_not_ready` unless COMPLETED |
+| POST | `/history/progress` | cookie | Record a batch of 1–50 progress reports; the latest observation (`watched_at`) wins; per-entry `saved` / `stale` / `not_found` / `expired` |
+| GET  | `/history` | cookie | Caller's history, most recently watched first, keyset `cursor`; only videos the caller can watch now |
+| GET  | `/history/positions` | cookie | Caller's progress on up to 50 `video_ids` |
+| DELETE | `/history/{video_id}` | cookie | Remove one entry (204, idempotent) |
+| DELETE | `/history` | cookie | Clear the caller's history (204) |
 | GET  | `/healthz` | – | Liveness |
 
 "Optional" auth: a COMPLETED video that is PUBLIC or UNLISTED is readable by
@@ -150,6 +158,15 @@ only. The local `.env` is gitignored, written mode 600, and excluded by
   The owner may edit title, description, and visibility (`PATCH`) and delete
   the row (`DELETE`); `POST /video/{id}/view` increments `views_count`
   without touching `updated_at`.
+- **PostgreSQL `watch_history`** — owned by the `/history` routes. One row
+  per (user, video). The upsert keeps the report with the latest
+  `watched_at`, clamped to the server clock, so a late flush never overwrites
+  newer progress from another browser; the server derives `completed`.
+  Reads hide rows for videos the caller can no longer watch (kept, not
+  deleted); `ON DELETE CASCADE` from `users` and `videos` removes them. Every
+  query must run on SQLite too (the tests): build dialect-specific SQL with
+  `db.get_bind().dialect.name`, take `now` in Python, store UTC. Per-user
+  progress never goes in `video:meta` or `GET /video/{id}`.
 - **PostgreSQL `transcode_results`** — owned by the poller. Terminal results
   whose `videos` row did not exist yet, keyed by `raw_key`. See "Poller
   worker". Nothing in the API reads or writes it.

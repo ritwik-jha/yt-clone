@@ -94,7 +94,7 @@ files in app storage, Bearer tokens). §11 lists what changed and why.
 | `user_id` | `uuid` | no | FK → `users.id` `ON DELETE CASCADE` |
 | `video_id` | `uuid` | no | FK → `videos.id` `ON DELETE CASCADE` |
 | `position_seconds` | `integer` | no | Last position reached, ≥ 0. Clamped to the duration. |
-| `duration_seconds` | `integer` | yes | Duration the browser's `<video>` reported. Used when `videos.duration_seconds` is null. |
+| `duration_seconds` | `integer` | yes | Duration the completion rule used: `videos.duration_seconds`, or what the browser's `<video>` reported when that is null. Stored so `GET /history/positions` can answer without joining `videos`. |
 | `completed` | `boolean` | no | Default `false`. Derived by the server (H4). |
 | `first_watched_at` | `timestamptz` | no | Default `now()`. Set on insert only. |
 | `last_watched_at` | `timestamptz` | no | Observation time of the stored progress (H2, H3), UTC. Drives ordering and conflict resolution. |

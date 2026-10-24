@@ -1,4 +1,5 @@
-"""ORM models for the users, videos, and transcode_results tables.
+"""ORM models for the users, videos, transcode_results, and watch_history
+tables.
 
 The schema itself is owned by the Alembic revisions in migrations/versions;
 keep these models and the latest revision in step (`alembic check` fails if
@@ -10,8 +11,8 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, DateTime, Enum, ForeignKey, Integer, MetaData, String, Text,
-    func, text,
+    BigInteger, Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Index,
+    Integer, MetaData, String, Text, func, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -124,3 +125,41 @@ class TranscodeResult(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(),
     )
+
+
+class WatchHistory(Base):
+    """One row per (user, video): the latest progress the user reached.
+    Written only by the /history routes (app/routers/history.py)."""
+
+    __tablename__ = "watch_history"
+    __table_args__ = (
+        Index(
+            "ix_watch_history_user_id_last_watched",
+            "user_id", text("last_watched_at DESC"), text("video_id DESC"),
+        ),
+        CheckConstraint("position_seconds >= 0", name="position_nonneg"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True,
+    )
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True, index=True,
+    )
+    position_seconds: Mapped[int] = mapped_column(Integer)
+    # What the browser's <video> reported; used when videos.duration_seconds
+    # is null.
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    completed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"),
+    )
+    first_watched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+    )
+    # Observation time of the stored progress (the client's watched_at,
+    # clamped to the server clock), UTC. Orders the history and decides
+    # which of two reports wins.
+    last_watched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = _updated_at()
+
+    video: Mapped[Video] = relationship()

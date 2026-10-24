@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
-from app.routers import auth, upload, video
+from app.routers import auth, history, upload, video
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ async def database_unavailable(request: Request, exc: OperationalError):
 app.include_router(auth.router)
 app.include_router(upload.router)
 app.include_router(video.router)
+app.include_router(history.router)
 
 
 @app.get("/healthz", tags=["meta"])

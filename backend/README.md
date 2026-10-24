@@ -45,6 +45,11 @@ than touching its resources. Deploy the pipeline first.
 | DELETE | `/video/{video_id}` | cookie, owner | Delete the video and, in the background, its S3 objects (204) |
 | GET  | `/video/{video_id}/progress` | optional | Transcode percent from `video:progress:<stem>` |
 | POST | `/video/{video_id}/view` | optional | Count one playback (204); 409 until COMPLETED |
+| POST | `/history/progress` | cookie | Record a batch of 1–50 progress reports; the latest observation (`watched_at`) wins; per-entry `saved` / `stale` / `not_found` / `expired` |
+| GET  | `/history` | cookie | Caller's history, most recently watched first, keyset `cursor`; only videos the caller can watch now |
+| GET  | `/history/positions` | cookie | Caller's progress on up to 50 `video_ids` |
+| DELETE | `/history/{video_id}` | cookie | Remove one entry (204, idempotent) |
+| DELETE | `/history` | cookie | Clear the caller's history (204) |
 | GET  | `/healthz` | – | Liveness |
 
 Anyone may read a COMPLETED video that is PUBLIC or UNLISTED. A PRIVATE or
@@ -84,7 +89,7 @@ backend/
 │   ├── config.py                      # pydantic-settings: environment, then .env
 │   ├── clients.py                     # boto3 + redis singletons
 │   ├── db.py                          # SQLAlchemy engine + sessions, RDS secret lookup
-│   ├── models.py                      # users, videos, transcode_results ORM models
+│   ├── models.py                      # users, videos, transcode_results, watch_history ORM models
 │   ├── users.py                       # users-row upsert shared by signup and get_current_user
 │   ├── cache.py                       # video:meta Redis cache
 │   ├── crypto.py                      # Cognito HMAC secret_hash
@@ -241,6 +246,19 @@ still unmatched after 7 days.
 - `status`, `dash_manifest_s3_key`, `hls_manifest_s3_key`,
   `duration_seconds`, `error`
 - `received_at`
+
+### `watch_history`
+Written only by the `/history` routes. One row per (user, video) with the
+latest progress; see `../docs/plans/watch-history-plan.md` for the sync rules.
+- `user_id` FK to `users.id`, `video_id` FK to `videos.id`, both
+  `ON DELETE CASCADE`; PK `(user_id, video_id)`
+- `position_seconds` integer (≥ 0, clamped to the duration),
+  `duration_seconds` integer (the video's, else what the browser reported),
+  `completed` boolean (≥ 95 % or ≤ 10 s left)
+- `first_watched_at`; `last_watched_at` — the observation time of the stored
+  report, clamped to the server clock, UTC; it orders the history and decides
+  which of two reports wins; `updated_at`
+- Indexes `(user_id, last_watched_at DESC, video_id DESC)` and `(video_id)`
 
 ### Redis
 - `video:progress:<stem>` — written by the transcoder, read by

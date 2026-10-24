@@ -33,9 +33,10 @@ from app.deps import get_current_user, get_optional_identity
 from app.errors import APIError
 from app.models import User, Video, VideoStatus, Visibility
 from app.schemas import (
-    ChannelResponse, Creator, CreatorDetail, FeedItem, FeedResponse,
-    MyVideosResponse, ProgressResponse, UpdateVideoRequest, VideoDetail,
+    ChannelResponse, CreatorDetail, FeedResponse, MyVideosResponse,
+    ProgressResponse, UpdateVideoRequest, VideoDetail,
 )
+from app.video_views import feed_fields, to_feed_item
 
 log = logging.getLogger(__name__)
 
@@ -54,38 +55,9 @@ def _not_found() -> APIError:
     return APIError(404, "video_not_found", "Video not found")
 
 
-def _thumbnail_url(key: str) -> str:
-    return f"https://{get_settings().thumbnails_cdn_domain}/{key}"
-
-
-def _manifest_url(key: str | None) -> str | None:
-    return f"https://{get_settings().cloudfront_domain}/{key}" if key else None
-
-
-def _feed_fields(video: Video) -> dict:
-    return {
-        "id":               video.id,
-        "title":            video.title,
-        "description":      video.description,
-        "thumbnail_url":    _thumbnail_url(video.thumbnail_s3_key),
-        "manifest_url":     _manifest_url(video.dash_manifest_s3_key),
-        "hls_url":          _manifest_url(video.hls_manifest_s3_key),
-        "views_count":      video.views_count,
-        "duration_seconds": video.duration_seconds,
-        "created_at":       video.created_at,
-    }
-
-
-def _to_feed_item(video: Video) -> FeedItem:
-    return FeedItem(
-        **_feed_fields(video),
-        creator=Creator(id=video.user.id, name=video.user.name),
-    )
-
-
 def _to_detail(video: Video) -> VideoDetail:
     return VideoDetail(
-        **_feed_fields(video),
+        **feed_fields(video),
         creator=CreatorDetail(
             id=video.user.id, name=video.user.name, created_at=video.user.created_at,
         ),
@@ -118,7 +90,7 @@ def _page(
 
 def _feed_page(db: Session, where: ColumnElement[bool], page: int, limit: int, sort: SortParam) -> FeedResponse:
     total, rows = _page(db, where, page, limit, sort)
-    return FeedResponse(total=total, page=page, limit=limit, items=[_to_feed_item(v) for v in rows])
+    return FeedResponse(total=total, page=page, limit=limit, items=[to_feed_item(v) for v in rows])
 
 
 def _matches(query: str) -> ColumnElement[bool]:
