@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
@@ -8,9 +10,13 @@ import '../cubits/session/session_cubit.dart';
 import '../cubits/upload_video/upload_video_cubit.dart';
 import '../platform/browser.dart';
 import '../platform/video_player.dart';
+import '../cubits/session/session_state.dart';
 import '../services/auth_service.dart';
+import '../services/history_service.dart';
+import '../services/history_sync.dart';
 import '../services/upload_video_service.dart';
 import '../services/video_service.dart';
+import '../services/watch_progress_store.dart';
 import 'router.dart';
 
 /// Makes a fresh [PlayerController] per watch page. Tests swap it.
@@ -30,6 +36,7 @@ class YtpApp extends StatefulWidget {
     this.auth,
     this.videos,
     this.uploads,
+    this.history,
   });
 
   final String apiBaseUrl;
@@ -41,6 +48,7 @@ class YtpApp extends StatefulWidget {
   final AuthService? auth;
   final VideoService? videos;
   final UploadVideoService? uploads;
+  final HistoryService? history;
 
   @override
   State<YtpApp> createState() => _YtpAppState();
@@ -57,7 +65,15 @@ class _YtpAppState extends State<YtpApp> {
   late final VideoService _videos = widget.videos ?? VideoService(_client.api);
   late final UploadVideoService _uploads =
       widget.uploads ?? UploadVideoService(api: _client.api, browser: _browser);
-  late final SessionCubit _session = SessionCubit(auth: _auth);
+  late final HistorySync _history = HistorySync(
+    browser: _browser,
+    service: widget.history ?? HistoryService(_client.api),
+  );
+  late final SessionCubit _session = SessionCubit(
+    auth: _auth,
+    beforeLogout: _history.beforeLogout,
+  );
+  late final StreamSubscription<SessionState> _sessionSub;
   late final UploadVideoCubit _upload = UploadVideoCubit(
     _uploads,
     browser: _browser,
@@ -70,11 +86,26 @@ class _YtpAppState extends State<YtpApp> {
   @override
   void initState() {
     super.initState();
+    _sessionSub = _session.stream.listen(_onSession);
     _session.restore();
+  }
+
+  /// Whose watch history is recorded follows the session.
+  void _onSession(SessionState state) {
+    switch (state) {
+      case SessionAuthenticated(:final user):
+        _history.signedIn(user.id);
+      case SessionUnauthenticated():
+        _history.signedOut();
+      case SessionUnknown() || SessionUnavailable():
+        break;
+    }
   }
 
   @override
   void dispose() {
+    _sessionSub.cancel();
+    _history.dispose();
     _router.dispose();
     _upload.close();
     _session.close();
@@ -89,6 +120,8 @@ class _YtpAppState extends State<YtpApp> {
       RepositoryProvider.value(value: _auth),
       RepositoryProvider.value(value: _videos),
       RepositoryProvider.value(value: _uploads),
+      RepositoryProvider.value(value: _history),
+      RepositoryProvider<WatchProgressStore>.value(value: _history.store),
     ],
     child: MultiBlocProvider(
       providers: [

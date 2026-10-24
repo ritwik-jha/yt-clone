@@ -11,6 +11,7 @@ import '../pages/auth/login_page.dart';
 import '../pages/auth/reset_password_page.dart';
 import '../pages/auth/sign_up_page.dart';
 import '../pages/channel_page.dart';
+import '../pages/history_page.dart';
 import '../pages/home_page.dart';
 import '../pages/not_found_page.dart';
 import '../pages/search_page.dart';
@@ -65,6 +66,7 @@ GoRouter buildRouter(SessionCubit session, {String initialLocation = '/'}) {
           ),
           _page(Routes.myVideos, (s) => const YourVideosPage()),
           _page(Routes.upload, (s) => const UploadPage()),
+          _page(Routes.history, (s) => const HistoryPage()),
         ],
       ),
       _page(

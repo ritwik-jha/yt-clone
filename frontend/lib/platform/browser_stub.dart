@@ -8,6 +8,7 @@ Browser createBrowser() => _NoBrowser();
 
 class _NoBrowser implements Browser {
   final _fullscreen = ValueNotifier(false);
+  final _storage = <String, String>{};
 
   @override
   ValueListenable<bool> get fullscreen => _fullscreen;
@@ -45,4 +46,28 @@ class _NoBrowser implements Browser {
 
   @override
   void setLeaveWarning(bool on) {}
+
+  @override
+  String? readLocal(String key) => _storage[key];
+
+  @override
+  void writeLocal(String key, String value) => _storage[key] = value;
+
+  @override
+  void removeLocal(String key) => _storage.remove(key);
+
+  @override
+  List<String> localKeys(String prefix) => [
+    for (final k in _storage.keys)
+      if (k.startsWith(prefix)) k,
+  ];
+
+  @override
+  void Function() listenForVisibility({
+    required void Function() onHidden,
+    required void Function() onVisible,
+  }) => () {};
+
+  @override
+  void postOnExit(String url, String json) {}
 }

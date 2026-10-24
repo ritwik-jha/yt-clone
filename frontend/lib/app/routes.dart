@@ -5,6 +5,7 @@ class Routes {
   static const watchPath = '/watch';
   static const myVideos = '/my-videos';
   static const upload = '/upload';
+  static const history = '/feed/history';
   static const signIn = '/signin';
   static const signUp = '/signup';
   static const verify = '/verify';
@@ -12,7 +13,7 @@ class Routes {
   static const resetPassword = '/reset-password';
 
   /// Pages that need a session; signed-out visitors go to Sign in first.
-  static const signedInOnly = {myVideos, upload};
+  static const signedInOnly = {myVideos, upload, history};
 
   /// Pages a signed-in user has no reason to see.
   static const signedOutOnly = {signIn, signUp};

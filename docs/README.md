@@ -29,11 +29,11 @@ them (`frontend/AGENTS.md`).
 |---|---|
 | [`video-streaming-scaling-and-bottlenecks.md`](architecture/video-streaming-scaling-and-bottlenecks.md) | Where the pipeline breaks under load, and designs to scale it. Mostly not built. |
 
-## `plans/` — features not built yet
+## `plans/` — feature plans
 
 | Doc | Covers | Depends on |
 |---|---|---|
-| [`watch-history-plan.md`](plans/watch-history-plan.md) | Watch history, resume across browsers, the History page, progress bars on thumbnails. | — |
+| [`watch-history-plan.md`](plans/watch-history-plan.md) | Watch history, resume across browsers, the History page, progress bars on thumbnails. Built; §12 lists where the code differs. | — |
 | [`recommendations-plan.md`](plans/recommendations-plan.md) | Tags, likes, subscriptions, *Not interested*; a personalised home feed and related videos for *Up next*; impressions and A/B measurement. | Watch history |
 
 Deployment runbooks live outside `docs/`: `DEPLOY_AWS.md` at the root, and

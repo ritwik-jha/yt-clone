@@ -1685,7 +1685,7 @@ The client moved from Android/iOS to Flutter web. What changed, and why:
 | W6 | Uploads | Pick or drop a `File`; PUT it to the presigned URL with XHR (progress, abort) straight from the browser; thumbnail captured from the video on a canvas or picked and re-encoded as JPEG; the upload belongs to the app, survives navigation, and warns before the tab closes | No multi-GB copy into Dart memory; no native picker or file system; resumable jobs (§7.5) don't apply to a browser tab |
 | W7 | Browser APIs | Behind `Browser` and `PlayerController` interfaces (`lib/platform/`), with VM stubs | Widget tests run on the VM over the whole app |
 | W8 | UI | The Figma "YouTube UI Clone" mockups: 56px masthead with search, 240px guide (72px rail on medium widths, drawer on narrow ones and on the watch page), chip bar, 16:9 grid, watch page with up-next column, channel page with HOME/VIDEOS tabs and shelves | The design the product owner chose |
-| W9 | What the mockup shows but the API lacks | Left out: likes, comments, subscriptions, history, notifications, voice search | No dead controls |
+| W9 | What the mockup shows but the API lacks | Left out: likes, comments, subscriptions, notifications, voice search. History was added later (`../docs/plans/watch-history-plan.md`) | No dead controls |
 
 Backend changes for the web are B9 in §14. Hosting (same-origin
 recommended, SPA fallback to `index.html`) is in `SETUP.md` §5.
