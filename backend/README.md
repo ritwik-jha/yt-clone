@@ -9,7 +9,7 @@ services, built from the same image:
    applies each status change to PostgreSQL (`app.workers.completion_poller`)
 
 Users and videos live in an RDS PostgreSQL instance that this stack owns. The
-API contract and schema are specified in `../docs/api-and-db-schema-spec.md`.
+API contract and schema are specified in `../docs/specs/api-and-db-schema-spec.md`.
 
 This directory sits at the repo root, alongside `IAC/` — the Terraform,
 dispatcher Lambda, and Fargate transcoder that make up the pipeline this

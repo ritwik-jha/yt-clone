@@ -11,7 +11,7 @@ image:
 
 Users and videos live in RDS PostgreSQL (SQLAlchemy 2 + psycopg 3, schema
 managed by Alembic). The API contract and schema come from
-`../docs/api-and-db-schema-spec.md`.
+`../docs/specs/api-and-db-schema-spec.md`.
 
 Lives at the repo root, a sibling of `../IAC/` (Terraform + dispatcher
 Lambda + Fargate transcoder). It owns the infrastructure it runs *on*
@@ -169,7 +169,7 @@ only. The local `.env` is gitignored, written mode 600, and excluded by
   lag the count by up to the TTL. Every Redis error is logged and falls back
   to PostgreSQL.
 
-## Auth flow (mirror of `../IAC/deployment-guide.md` and `../docs/auth-implementation-guide.md`)
+## Auth flow (mirror of `../IAC/deployment-guide.md` and `../docs/guides/auth-implementation-guide.md`)
 
 - App client MUST have a **client secret** and `USER_PASSWORD_AUTH`
   enabled — otherwise `initiate_auth` rejects the `SECRET_HASH`.

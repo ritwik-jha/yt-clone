@@ -1,4 +1,4 @@
-"""Pydantic request/response models (docs/api-and-db-schema-spec.md)."""
+"""Pydantic request/response models (docs/specs/api-and-db-schema-spec.md)."""
 
 import re
 from datetime import datetime

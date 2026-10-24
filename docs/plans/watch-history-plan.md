@@ -400,7 +400,7 @@ with `Content-Type` for the origins in `CORS_ORIGINS`.
 | `scripts/seed_sqlite.py`, `tests/support/seed_data.py` | Seeded history rows (§8.1), written after the videos. |
 | `../frontend/deploy/nginx.conf.template` | Proxy the new paths to the API: `location ~ ^/((auth\|video\|upload)/\|history(/\|$)\|healthz$)`. `/history` itself has no trailing path, and the app's page is `/feed/history`, so the two never collide. Without this the deployed app gets `index.html` back from every history call. |
 | `../scripts/deploy_smoke_test.py` | `GET /history` through the frontend URL without cookies is a JSON 401 `missing_access_token` (proves the proxy route); signed in, `POST /history/progress` for the uploaded video is `saved`, it appears in `GET /history`, and `DELETE /history` empties it. |
-| `AGENTS.md`, `README.md`, `../docs/api-and-db-schema-spec.md` | Route table, the new table, and the sync rules. |
+| `AGENTS.md`, `README.md`, `../docs/specs/api-and-db-schema-spec.md` | Route table, the new table, and the sync rules. |
 
 The completion poller and the transcoder don't change. Deleting a video
 already removes its history rows through the cascade (the SQLite engine turns
