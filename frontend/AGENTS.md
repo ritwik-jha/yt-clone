@@ -5,7 +5,7 @@ dropped). `README.md` has the layout, `SETUP.md` the run/build/deploy steps,
 `PLAN.md` the original plan (its §16 records the move to web).
 
 - The backend code in `../backend/app/` is the API contract. Don't copy request
-  shapes from `../docs/*guide*.md` (PLAN §3 lists every divergence).
+  shapes from `../docs/guides/*.md` (PLAN §3 lists every divergence).
 - Services throw only `ApiException`. Cubits and pages branch on `code`, never
   on `detail` text (PLAN D16).
 - The session is two HttpOnly cookies the browser keeps and sends

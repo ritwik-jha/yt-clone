@@ -41,7 +41,11 @@ The client is a Flutter web app (dark, YouTube-style, from the Figma
 │
 ├── DEPLOY_AWS.md                  End-to-end AWS deploy + live integration test (runbook)
 │
-└── docs/                          Specs and design guides (see "Design docs" below)
+└── docs/                          Design docs (see "Design docs" below, and docs/README.md)
+    ├── specs/                     API + DB schema, screens, ECS task definition
+    ├── guides/                    Early implementation guides (design rationale)
+    ├── architecture/              Scaling analysis
+    └── plans/                     Feature plans: watch history, recommendations
 ```
 
 `backend/` is deliberately a sibling of `IAC/`, not a child: it is
@@ -197,21 +201,26 @@ transcoder image, x86_64 backend image.
 
 ## Design docs
 
-`docs/api-and-db-schema-spec.md` is the API and database schema spec the
-backend implements. The other guides in `docs/` predate the implementation
-and are kept as design rationale, not as a description of the current
-system. Where they disagree with the code, **the code is authoritative**.
-Known divergences:
+`docs/` is grouped by kind; `docs/README.md` lists every file.
+
+- `docs/specs/api-and-db-schema-spec.md` is the API and database schema spec
+  the backend implements.
+- The rest of `docs/specs/` and everything in `docs/guides/` predate the
+  implementation and are kept as design rationale, not as a description of
+  the current system. Where they disagree with the code, **the code is
+  authoritative**. Known divergences:
 
 | Guide | Says | Actually implemented as |
 |---|---|---|
-| `ecs-sqs-deployment-guide.md` | Long-running Python SQS consumer daemon dispatches tasks | Lambda event source mapping dispatches tasks |
-| `ecs-task-definition-spec.md` | Hand-written `task-definition.json` | `aws_ecs_task_definition` in `IAC/terraform/ecs.tf` |
+| `guides/ecs-sqs-deployment-guide.md` | Long-running Python SQS consumer daemon dispatches tasks | Lambda event source mapping dispatches tasks |
+| `specs/ecs-task-definition-spec.md` | Hand-written `task-definition.json` | `aws_ecs_task_definition` in `IAC/terraform/ecs.tf` |
 | several | Backend processes under systemd in a venv | ECS services (Express Mode API + Fargate poller), provisioned by `backend/terraform` |
 | several | Flutter mobile client flows | Flutter web app in `frontend/` (see its README) |
 
-`video-streaming-scaling-and-bottlenecks.md` is forward-looking analysis
-of scaling limits; most of it is not built yet.
+- `docs/architecture/video-streaming-scaling-and-bottlenecks.md` is
+  forward-looking analysis of scaling limits; most of it is not built yet.
+- `docs/plans/` holds plans for features that are not built yet: watch
+  history, and recommendations (which builds on watch history).
 
 ---
 

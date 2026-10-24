@@ -8,9 +8,9 @@
 
 This plan covers the Flutter client for the video platform: what to build,
 how it talks to the backend in `../backend/`, and in what order. The screens
-come from `../docs/frontend-screens-spec.md`. The Flutter snippets in
-`../docs/auth-implementation-guide.md` and
-`../docs/s3-upload-and-metadata-guide.md` are useful background.
+come from `../docs/specs/frontend-screens-spec.md`. The Flutter snippets in
+`../docs/guides/auth-implementation-guide.md` and
+`../docs/guides/s3-upload-and-metadata-guide.md` are useful background.
 
 Where those documents disagree with the backend as built, this plan follows
 the backend code (`backend/app/`). §3 lists every difference, so the spec's
