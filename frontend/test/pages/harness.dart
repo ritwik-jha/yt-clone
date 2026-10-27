@@ -32,8 +32,9 @@ Video video(
   title: title,
   description: description,
   thumbnailUrl: '',
-  hlsUrl: 'https://cdn/$id/master.m3u8',
-  manifestUrl: 'https://cdn/$id/manifest.mpd',
+  // As the API answers them: relative to its origin (VideoService.streamUrl).
+  hlsUrl: '/media/$id/dash/master.m3u8',
+  manifestUrl: '/media/$id/dash/manifest.mpd',
   viewsCount: views,
   durationSeconds: 61,
   creator: creator,
@@ -210,6 +211,24 @@ class Harness {
     when(() => history.clear()).thenAnswer((_) async {});
   }
 
+  /// What `authorizePlayback` answers; by default an hour of access.
+  Future<DateTime?> Function(String videoId)? authorizePlayback;
+
+  /// Streams are authorized ([authorizePlayback]); URLs resolve against the
+  /// API's origin, as [VideoService.streamUrl] does.
+  void stubPlayback() {
+    when(() => videos.authorizePlayback(any())).thenAnswer(
+      (inv) =>
+          authorizePlayback?.call(inv.positionalArguments.first as String) ??
+          Future.value(DateTime.now().add(const Duration(hours: 1))),
+    );
+    when(() => videos.streamUrl(any())).thenAnswer(
+      (inv) => Uri.parse(
+        'http://api.test',
+      ).resolve(inv.positionalArguments.first as String).toString(),
+    );
+  }
+
   void stubFeed() {
     when(
       () => videos.feed(
@@ -268,6 +287,7 @@ class Harness {
     }
     stubFeed();
     stubHistory();
+    stubPlayback();
     await tester.pumpWidget(
       YtpApp(
         apiBaseUrl: 'http://api.test',

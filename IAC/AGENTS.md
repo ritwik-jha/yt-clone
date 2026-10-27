@@ -13,8 +13,9 @@ See `../backend/AGENTS.md`.
 ```
 IAC/
 ├── terraform/     Provision all pipeline infra (VPC, S3, SQS, ECR, ECS,
-│                  IAM, Lambda, ElastiCache Redis, Cognito,
-│                  CloudFront + OAC for the processed bucket).
+│                  IAM, Lambda, ElastiCache Redis, Cognito).
+│                  The processed bucket's CDN is the edge distribution
+│                  in ../frontend/terraform/cloudfront.tf.
 │                  Self-contained: creates its own VPC + subnets.
 ├── lambda/        SQS-triggered dispatcher. Reads S3 ObjectCreated
 │                  events, invokes ecs:RunTask with per-message env
@@ -63,7 +64,8 @@ Client --presigned PUT--> S3 raw bucket
 Client --GET /video/{id}/progress--------------------> FastAPI backend --GET video:progress:<id> --> Redis
                                                                     +-> SELECT --> PostgreSQL
 
-Client --GET manifest_url | hls_url--> CloudFront --OAC--> S3 processed bucket
+Client --POST /video/{id}/playback--> FastAPI backend (sets CloudFront signed cookies)
+Client --GET /media/<key> + cookies--> edge CloudFront --OAC--> S3 processed bucket
 ```
 
 ## Key design invariants
@@ -97,8 +99,8 @@ Client --GET manifest_url | hls_url--> CloudFront --OAC--> S3 processed bucket
 | Resource | Provisioned by | Consumed by |
 |---|---|---|
 | VPC + subnets + IGW + workload SG + redis SG | `terraform/network.tf` | Fargate, Redis |
-| S3 raw + processed buckets | `terraform/storage.tf` | Client (presigned PUT), transcoder, CloudFront |
-| CloudFront + OAC + processed bucket policy | `terraform/cloudfront.tf` | Client (DASH / HLS playback) |
+| S3 raw + processed buckets | `terraform/storage.tf` | Client (presigned PUT), transcoder, edge CloudFront |
+| Edge CloudFront + OAC + processed bucket policy | `../frontend/terraform/cloudfront.tf` | Client (app, API, DASH / HLS playback with signed cookies) |
 | S3 thumbnails bucket + its CloudFront distribution | `../backend/terraform/storage.tf`, `cloudfront.tf` | Client (presigned PUT, CDN reads) |
 | SQS ingest queue + DLQ | `terraform/storage.tf` | Lambda dispatcher |
 | SQS completion queue + DLQ | `terraform/storage.tf` | Transcoder (send), backend poller (receive) |

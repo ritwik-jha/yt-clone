@@ -94,4 +94,19 @@ class VideoService {
 
   Future<void> recordView(String id) =>
       guardApi(() => _api.post<dynamic>('/video/$id/view'));
+
+  /// Lets this browser stream video [id] for a while: the API sets the
+  /// CloudFront signed cookies the CDN asks for. Returns when they stop
+  /// working; null when the API doesn't sign (local runs).
+  Future<DateTime?> authorizePlayback(String id) => guardApi(() async {
+    final res = await _api.post<Map<String, dynamic>>('/video/$id/playback');
+    final at = res.data?['expires_at'] as String?;
+    return at == null ? null : DateTime.parse(at);
+  });
+
+  /// The URL to load for a stream URL the API returned. The API answers
+  /// them relative to its own origin (`/media/...`, served by the same
+  /// CloudFront distribution); absolute ones pass through.
+  String streamUrl(String url) =>
+      Uri.parse(_api.options.baseUrl).resolve(url).toString();
 }

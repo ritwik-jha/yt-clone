@@ -22,6 +22,7 @@ import '../models/watch_progress.dart';
 import '../platform/browser.dart';
 import '../platform/video_player.dart';
 import '../services/history_sync.dart';
+import '../services/playback_access.dart';
 import '../services/progress_tracker.dart';
 import '../services/video_service.dart';
 import '../widgets/auth_scaffold.dart';
@@ -60,6 +61,21 @@ class _WatchPageState extends State<WatchPage> {
   PlaybackSource? _opened;
   bool _counted = false;
 
+  /// The signed CDN cookies this video's stream needs.
+  late final PlaybackAccess _access = PlaybackAccess(
+    context.read<VideoService>(),
+    widget.videoId,
+  );
+
+  /// What the player loaded for [_opened] (its URL resolved).
+  PlaybackSource? _loaded;
+
+  /// A failed stream is reopened once a minute at most: after fresh cookies
+  /// (they may have expired while the tab slept), from where it stopped.
+  static const _retryGap = Duration(minutes: 1);
+  DateTime? _lastRetry;
+  bool _retrying = false;
+
   /// Where to resume, decided at most [_resumeWait] after the page opened.
   late final Future<WatchProgress?> _resume = _lookUpResume();
   static const _resumeWait = Duration(milliseconds: 1500);
@@ -75,6 +91,7 @@ class _WatchPageState extends State<WatchPage> {
     _player.addListener(_onPlayer);
     _browser; // resolved now: dispose() can't look it up
     _history;
+    _access;
     _resume;
     final session = context.read<SessionCubit>();
     _followSession(session.state);
@@ -88,6 +105,7 @@ class _WatchPageState extends State<WatchPage> {
     if (_tracker case final t?) _history.untrack(t);
     _player.removeListener(_onPlayer);
     _player.dispose();
+    _access.dispose();
     _detail.close();
     if (_browser.fullscreen.value) _browser.setFullscreen(false);
     super.dispose();
@@ -99,6 +117,24 @@ class _WatchPageState extends State<WatchPage> {
       _counted = true;
       _detail.recordView();
     }
+    if (_player.value.error != null) _retryAfterError();
+  }
+
+  Future<void> _retryAfterError() async {
+    final loaded = _loaded;
+    final now = DateTime.now();
+    if (loaded == null ||
+        _retrying ||
+        (_lastRetry != null && now.difference(_lastRetry!) < _retryGap)) {
+      return;
+    }
+    _retrying = true;
+    _lastRetry = now;
+    final at = _player.value.position;
+    await _access.renew();
+    _retrying = false;
+    if (!mounted || _loaded != loaded) return;
+    _player.open(loaded, startAt: at > Duration.zero ? at : null);
   }
 
   void _followSession(SessionState state) {
@@ -133,10 +169,11 @@ class _WatchPageState extends State<WatchPage> {
 
   Future<void> _open(PlaybackSource source) async {
     _opened = source;
-    final progress = await _resume;
+    final (progress, loaded) = await (_resume, _access.prepare(source)).wait;
     if (!mounted || _opened != source) return;
+    _loaded = loaded;
     final at = progress?.resumeAt;
-    _player.open(source, startAt: at);
+    _player.open(loaded, startAt: at);
     if (at != null) setState(() => _resumedFrom = at);
   }
 

@@ -192,6 +192,27 @@ Future<void> _pumpUntil(
   throw TestFailure('Timed out waiting for $finder');
 }
 
+/// Waits until the test server's CDN stand-in (backend
+/// tests/support/server.py) served a path ending in [suffix], and checks it
+/// was let through rather than refused.
+Future<void> _waitForMedia(WidgetTester tester, Dio api, String suffix) async {
+  final end = DateTime.now().add(const Duration(seconds: 20));
+  List<dynamic> seen = const [];
+  while (DateTime.now().isBefore(end)) {
+    await tester.pump(const Duration(milliseconds: 200));
+    seen = (await api.get<List<dynamic>>('/_cdn/log')).data!;
+    final hits = [
+      for (final e in seen)
+        if ((e as List<dynamic>).first.toString().endsWith(suffix)) e[1] as int,
+    ];
+    if (hits.isNotEmpty) {
+      expect(hits.first, 200, reason: 'media requests: $seen');
+      return;
+    }
+  }
+  throw TestFailure('No media request for *$suffix; saw $seen');
+}
+
 Future<void> _type(WidgetTester tester, Finder field, String text) async {
   String current() => tester
       .widget<EditableText>(
@@ -311,11 +332,14 @@ void main() {
     expect(find.byType(VideoListTile), findsOneWidget);
     expect(find.text('Fingerstyle guitar basics'), findsOneWidget);
 
-    // 6. Watch it: details from the backend, no owner actions.
+    // 6. Watch it: details from the backend, no owner actions. The player
+    // asked the CDN stand-in for the playlist with the signed cookies the
+    // page got first (POST /video/{id}/playback), and was let through.
     await _tap(tester, find.text('Fingerstyle guitar basics'));
     await _pumpUntil(tester, find.text('SHARE'));
     expect(find.text('Bob Tester'), findsWidgets);
     expect(find.text('EDIT'), findsNothing);
+    await _waitForMedia(tester, api, '/master.m3u8');
 
     // 7. The creator's channel lists their two public, ready videos.
     await _tap(tester, find.text('Bob Tester').first);

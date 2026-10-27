@@ -45,6 +45,7 @@ than touching its resources. Deploy the pipeline first.
 | DELETE | `/video/{video_id}` | cookie, owner | Delete the video and, in the background, its S3 objects (204) |
 | GET  | `/video/{video_id}/progress` | optional | Transcode percent from `video:progress:<stem>` |
 | POST | `/video/{video_id}/view` | optional | Count one playback (204); 409 until COMPLETED |
+| POST | `/video/{video_id}/playback` | optional | Let this browser stream the video: sets the CloudFront signed cookies for its media folder and returns `expires_at` (null when the API has no key); 404 unless viewable, 409 until COMPLETED |
 | POST | `/history/progress` | cookie | Record a batch of 1–50 progress reports; the latest observation (`watched_at`) wins; per-entry `saved` / `stale` / `not_found` / `expired` |
 | GET  | `/history` | cookie | Caller's history, most recently watched first, keyset `cursor`; only videos the caller can watch now |
 | GET  | `/history/positions` | cookie | Caller's progress on up to 50 `video_ids` |
@@ -145,7 +146,7 @@ For local runs, `.env.example` documents every variable and
 | `REDIS_HOST` / `REDIS_PORT` | pipeline outputs `redis_host` / `redis_port` |
 | `REDIS_PROGRESS_PREFIX` | pipeline output `redis_progress_key_prefix` |
 | `S3_THUMBNAILS_BUCKET` | backend output `thumbnails_bucket` |
-| `CLOUDFRONT_DOMAIN` | pipeline output `cloudfront_domain_name` |
+| `MEDIA_BASE_URL`, `MEDIA_KEY_PAIR_ID`, `MEDIA_PRIVATE_KEY`, `MEDIA_COOKIE_TTL_SECONDS` | carried (default `/media`, no key: no signed cookies locally) |
 | `THUMBNAILS_CDN_DOMAIN` | backend output `thumbnails_cdn_domain` |
 | `DB_*` | carried from `.env` / `.env.example` — local runs use the compose PostgreSQL, since RDS is private to the VPC |
 | `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_CLIENT_SECRET` | pipeline outputs `cognito_user_pool_id` / `cognito_user_pool_client_id` / `cognito_user_pool_client_secret` |
@@ -233,9 +234,13 @@ The schema is defined by the Alembic revisions in `migrations/versions/`;
 - `created_at` (indexed), `updated_at`
 
 Responses carry URLs, not keys: `manifest_url` (DASH) is
-`https://<CLOUDFRONT_DOMAIN>/<dash_manifest_s3_key>`, `hls_url` is the same
-for `hls_manifest_s3_key`, and `thumbnail_url` is
+`<MEDIA_BASE_URL>/<dash_manifest_s3_key>`, `hls_url` is the same for
+`hls_manifest_s3_key`, and `thumbnail_url` is
 `https://<THUMBNAILS_CDN_DOMAIN>/<thumbnail_s3_key>`, all built at read time.
+`MEDIA_BASE_URL` is `/media`, so stream URLs are relative to the API's
+origin: the edge CloudFront distribution serves the app, the API and
+`/media/*` on one domain, and `/media/*` only to holders of the signed
+cookies from `POST /video/{id}/playback` (`app/media_signing.py`).
 
 ### `transcode_results`
 Written and read only by the poller. Holds a transcoder's COMPLETED or

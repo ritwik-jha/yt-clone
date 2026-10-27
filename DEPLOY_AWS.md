@@ -15,23 +15,33 @@ safe to re-run: if something fails half-way, fix it and continue from the
 failed step.
 
 ```
-                         Browser
-                            │ https://<frontend>.on.aws
-                            ▼
+                              Browser
+                                 │ https://<edge>.cloudfront.net
+                                 ▼
+             ┌──── CloudFront edge distribution (frontend/terraform) ────┐
+             │  /media/*  signed cookies only ─► S3 processed (HLS/DASH)  │
+             │  /*        not cached ─┐                                   │
+             └────────────────────────┼───────────────────────────────────┘
+                                      ▼
         ┌────────── ECS Express Mode (HTTPS ALB, AWS cert) ──────────┐
         │  video-frontend (nginx)               video-backend-api    │
         │   ├─ /            → Flutter web build    (FastAPI)          │
         │   └─ /auth/ /video/ /upload/ /healthz ──► https://<api>.on.aws
         └────────────────────────────────────────────────────────────┘
-   presigned PUT ─► S3 raw ─► SQS ─► Lambda ─► Fargate transcoder ─► S3 processed ─► CloudFront (HLS/DASH)
+   presigned PUT ─► S3 raw ─► SQS ─► Lambda ─► Fargate transcoder ─► S3 processed
                                                      │ SQS completion ─► video-backend-poller ─► RDS
 ```
 
-The frontend's nginx forwards the API paths to the API. The browser
-therefore sees one origin, which gives three properties:
+The browser sees one origin, the edge distribution: it serves the playback
+media under `/media/`, and sends everything else to the frontend's nginx,
+which forwards the API paths to the API. That gives four properties:
 - The auth cookies are first-party (`SameSite=Lax`).
 - The API keeps `CORS_ORIGINS` empty.
 - Nothing in the Flutter build needs the API's URL (`API_BASE_URL` is empty).
+- The streams are private. `/media/` only answers requests that carry the
+  CloudFront signed cookies `POST /video/{id}/playback` sets, for one video's
+  folder and for an hour (`backend/app/media_signing.py`). The player sends
+  them like any first-party cookie.
 
 ---
 
@@ -90,6 +100,7 @@ Run each command and check the version:
 | Python | `python --version` | ≥ 3.11 |
 | ffmpeg | `ffmpeg -version` | any (makes the test video) |
 | jq, curl, git | `jq --version` | any |
+| OpenSSL | `openssl version` | any (makes the playback signing key, §4.1) |
 
 If one is missing, tell the user what to install and stop. Don't install
 system packages without asking.
@@ -194,9 +205,11 @@ This stack creates:
 - the SQS queues and their DLQs,
 - the Lambda dispatcher,
 - the ECS cluster and task definition for the transcoder,
-- ElastiCache Serverless (Valkey, Redis-compatible),
-- the Cognito user pool, and
-- the playback CloudFront distribution.
+- ElastiCache Serverless (Valkey, Redis-compatible), and
+- the Cognito user pool.
+
+The processed bucket has no public path of its own: the frontend stack's
+edge distribution serves it (§5).
 
 ### 2.1 Variables
 
@@ -237,9 +250,11 @@ terraform plan -input=false -out=tfplan | tee "$REPO_ROOT/deploy-artifacts/plan-
    - **Pipeline:** the plan above.
    - **Backend:** RDS PostgreSQL `db.t4g.micro`, the API Express Mode
      service with its ALB, the poller service, IAM roles, the thumbnails
-     bucket and its CloudFront distribution, and ECR.
-   - **Frontend:** ECR, IAM roles, a security group, and the Express Mode
-     service.
+     bucket and its CloudFront distribution, the CloudFront key group for
+     the playback cookies, and ECR.
+   - **Frontend:** ECR, IAM roles, a security group, the Express Mode
+     service, and the edge CloudFront distribution (the app's URL), its
+     `/media/` function, and the processed bucket's policy.
 
 ### 2.3 Apply
 
@@ -312,6 +327,29 @@ fi
 cat terraform.tfvars
 ```
 
+**The playback signing key.** The API signs the playback cookies with an
+RSA key that never passes through Terraform. Make it once and keep it in
+SSM: the private half as a SecureString, which the API's execution role
+injects; the public half, which `media_signing.tf` reads into the CloudFront
+key group. The block does nothing if the key exists. Don't print the
+private key.
+
+```bash
+source deploy-artifacts/env.sh
+P=/video-backend/media-signing          # backend/terraform var.media_signing_parameter_prefix
+if ! aws ssm get-parameter --name "$P/public" >/dev/null 2>&1; then
+  KEY="$(openssl genrsa 2048 2>/dev/null)"
+  aws ssm put-parameter --name "$P/private" --type SecureString --overwrite \
+    --value="$KEY" --query Version
+  aws ssm put-parameter --name "$P/public" --type String --overwrite \
+    --value="$(printf '%s\n' "$KEY" | openssl rsa -pubout 2>/dev/null)" --query Version
+  unset KEY
+fi
+aws ssm get-parameter --name "$P/public" --query Parameter.Value --output text | head -1
+```
+
+Expect `-----BEGIN PUBLIC KEY-----`.
+
 ### 4.2 ECR repository first, then the image
 
 ```bash
@@ -373,6 +411,12 @@ What gets deployed:
   service** in the backend's cluster. Express Mode gives it an HTTPS ALB with
   an AWS certificate and a `*.on.aws` URL. The container health check is
   `/_health`.
+- **Edge:** `frontend/terraform/cloudfront.tf` puts one CloudFront
+  distribution in front of that ALB and the processed bucket. Its
+  `*.cloudfront.net` URL is the app's URL (`frontend_url`). `/media/*` goes to
+  the bucket and needs the signed cookies; everything else goes to the ALB,
+  uncached. The ALB's own URL (`origin_url`) still serves the app, but
+  videos don't play there.
 
 ### 5.1 Build the web app
 
@@ -427,6 +471,9 @@ terraform apply -input=false tfplan
 terraform output
 ```
 
+The first apply takes 10–15 minutes: the Express Mode service, then the
+edge distribution, which CloudFront has to deploy.
+
 ### 5.4 Verify
 
 ```bash
@@ -436,28 +483,30 @@ echo "export FRONTEND_URL=$FRONTEND_URL" >> deploy-artifacts/env.sh
 for i in $(seq 1 30); do curl -fsS "$FRONTEND_URL/_health" && break; sleep 10; done
 curl -fsS "$FRONTEND_URL/healthz"; echo                 # the API, through nginx
 curl -fsS -o /dev/null -w '%{http_code} %{content_type}\n' "$FRONTEND_URL/watch?v=x"   # 200 text/html
+curl -sS -o /dev/null -w '%{http_code}\n' "$FRONTEND_URL/media/x/dash/master.m3u8"     # 403: needs the signed cookies
 ```
 
-A new `*.on.aws` name can take a minute or two to resolve. The loop allows
-for that.
+`FRONTEND_URL` is the edge distribution's `https://<id>.cloudfront.net`. A
+new distribution can take a few minutes to answer everywhere. The loop
+allows for that.
 
 ---
 
 ## 6. Integration test against the live system
 
-`scripts/deploy_smoke_test.py` runs about 60 checks through the frontend URL,
+`scripts/deploy_smoke_test.py` runs about 90 checks through the frontend URL,
 the way a browser would:
 
 | Area | Checks |
 |---|---|
-| Static app | The app is served; app routes fall back to `index.html`, including `/upload` and `/channel/...`, which stay with the app; the player libraries load |
+| Static app | The app is served; app routes fall back to `index.html`, including `/upload` and `/channel/...`, which stay with the app; the player libraries load; `/media/` without signed cookies is a 403 |
 | API through the frontend origin | `/healthz`, the feed (latest and popular), search, and a 401 when signed out |
 | Accounts | A throwaway account `deploy-smoke+<stamp>@example.com` signs up and is confirmed with `AdminConfirmSignUp`, because real Cognito emails a code. Then sign-in, with the cookie attributes checked (HttpOnly, Secure, refresh token on `Path=/auth`, host-only), then `/auth/me` and refresh |
 | Upload | A 6-second H.264 MP4 and a JPEG made with ffmpeg; presigned URLs; the S3 CORS preflight; PUTs to S3; save. The video appears in *Your videos* |
 | Pipeline | Polls `/video/{id}/progress` until `COMPLETED` (15-minute limit). Covers S3 → SQS → Lambda → Fargate → SQS → poller → RDS |
-| Playback | `hls_url`, `manifest_url` and the thumbnail load from CloudFront with CORS headers; the HLS master and media playlists and the first segment load |
+| Playback | `hls_url` and `manifest_url` are `/media/...` on the app's origin and refused (403) until `POST /video/{id}/playback`. That sets the three CloudFront cookies (HttpOnly, Secure, scoped to the video's folder, about an hour). Then the HLS master and media playlists, the first segment and the DASH manifest load; a query string is refused (400); the cookies don't open another video's folder. Signed out, a PUBLIC video may be streamed and a PRIVATE one may not (404), while its owner still may. The thumbnail loads from its own CloudFront |
 | Listings | Feed, search, channel, a view count, and editing the title |
-| Browser (`--browser`) | Headless Chromium loads the app and its feed. The watch page fetches the HLS playlist. Screenshots are saved to `deploy-artifacts/` |
+| Browser (`--browser`) | Headless Chromium loads the app and its feed. The watch page fetches the HLS playlist with its signed cookies (200). Screenshots are saved to `deploy-artifacts/` |
 | Cleanup | Deletes the video, signs out, and deletes the Cognito user. The `users` row stays, because there is no API to remove it |
 
 ```bash
@@ -496,9 +545,8 @@ Finish with a short summary in this shape. Also save it as
 `deploy-artifacts/deploy-summary.md`.
 
 ```
-Frontend URL:  https://<...>.on.aws          ← the deliverable
+Frontend URL:  https://<...>.cloudfront.net  ← the deliverable (app, API and /media/)
 API URL:       https://<...>.on.aws           (also reachable through the frontend)
-Playback CDN:  https://<cloudfront_domain_name>
 Region / account: <region> / <account>
 Images: backend <BACKEND_TAG>, frontend <FRONTEND_TAG>, transcoder latest
 Integration test: PASSED n/n (deploy-artifacts/smoke-report.json)
@@ -511,7 +559,6 @@ Get the values with:
 source deploy-artifacts/env.sh
 terraform -chdir=frontend/terraform output -raw frontend_url; echo
 terraform -chdir=backend/terraform output -raw api_url; echo
-terraform -chdir=IAC/terraform output -raw cloudfront_domain_name; echo
 ```
 
 ---
@@ -531,7 +578,9 @@ terraform -chdir=IAC/terraform output -raw cloudfront_domain_name; echo
 | `AccessDenied` for `AdminConfirmSignUp` in the test | The profile lacks Cognito admin rights; report it |
 | Video stays `PENDING` | Lambda: `aws logs tail /aws/lambda/video-transcoder-dispatcher --since 15m`. Transcoder: `aws logs tail /ecs/video-transcoder --since 15m` (image missing? → §3). Poller: `aws logs tail /video-backend --since 15m --filter-pattern poller` |
 | Video goes `FAILED` | Transcoder log for the ffmpeg error |
-| CloudFront 403/404 on manifests right after the first apply | The distribution may still be deploying: `aws cloudfront get-distribution --id $(terraform -chdir=IAC/terraform output -raw cloudfront_distribution_id) --query Distribution.Status` must be `Deployed` |
+| `/media/` answers 403 even after `POST /video/{id}/playback` | Right after the first apply the distribution may still be deploying: `aws cloudfront get-distribution --id $(terraform -chdir=frontend/terraform output -raw edge_distribution_id) --query Distribution.Status` must be `Deployed`. Otherwise the cookies don't match the key group: the API task's `MEDIA_KEY_PAIR_ID` must be the key in `backend/terraform` output `media_key_group_id`, and SSM `/video-backend/media-signing/private` the pair of `.../public`. If the key was remade, re-apply the backend stack. A playback answer with `"expires_at": null` means the API has no key: check the `MEDIA_PRIVATE_KEY` secret on the task |
+| Videos don't play on the `*.on.aws` URL | Expected: `/media/` exists only on the edge distribution. Use `frontend_url` |
+| `ParameterNotFound` for `/video-backend/media-signing/public` on the backend plan | The signing key step in §4.1 was skipped |
 | Upload PUT 403 | Clock skew or an expired URL; re-run. The test sends exactly `video/mp4` / `image/jpeg` |
 | Docker push: `no basic auth credentials` / `403` | ECR login expired (12 h); re-run the `get-login-password` line |
 | `python -m playwright install chromium` can't download | Pass `--chromium` with a local Chrome/Chromium, or drop `--browser` and say so in the report |
@@ -566,6 +615,15 @@ tag doesn't change the task definition, so nothing restarts.
 | Frontend | §5.1 build → `docker buildx build ... -t $ECR_URL:<tag> --push .` → `terraform -chdir=frontend/terraform apply -var image_tag=<tag>` |
 | Transcoder | §3 (ECS pulls `:latest` on the next upload) |
 
+**Upgrading a deployment from before the signed media** (when the pipeline
+stack still has `cloudfront.tf`): apply the stacks in order. First the
+pipeline stack (§2.3), which deletes the old public playback distribution
+and the processed bucket's policy. Then the signing key and the backend
+(§4.1, §4.3), then the frontend (§5.3), which creates the edge distribution
+and the new bucket policy. Videos don't play between the first apply and
+the last. The app's URL changes to the edge distribution's, so tell the
+user the new `frontend_url`.
+
 ---
 
 ## 11. Teardown
@@ -580,6 +638,7 @@ Approval to deploy does not cover this.
 - the Cognito user pool, so every account is gone;
 - the ElastiCache progress cache;
 - the SQS queues;
+- the playback signing key in SSM (§11.6);
 - all ECR images;
 - the CloudWatch logs.
 
@@ -608,7 +667,7 @@ instance, security groups and Express Mode ALB all live in the pipeline's VPC.
 | Container Insights log groups aren't managed by Terraform | §11.6 |
 
 **Duration:** about 30–50 minutes. Most of it is the two CloudFront
-distributions, RDS (which also writes the final snapshot), ElastiCache and
+distributions (edge and thumbnails), RDS (which also writes the final snapshot), ElastiCache and
 Express Mode draining. Run every `terraform apply` below in the background
 (§0) and wait for it to exit.
 
@@ -741,7 +800,7 @@ if [ ! -s deploy-artifacts/teardown-ids.sh ]; then
     echo "export LAMBDA_NAME=$(out IAC/terraform lambda_function_name)"
     echo "export USER_POOL_ID=$(out IAC/terraform cognito_user_pool_id)"
     echo "export REDIS_NAME=$(tfvar IAC/terraform redis_cache_name)"
-    echo "export VIDEO_CDN_ID=$(out IAC/terraform cloudfront_distribution_id)"
+    echo "export EDGE_CDN_ID=$(out frontend/terraform edge_distribution_id)"
     echo "export BACKEND_CLUSTER=$(out backend/terraform ecs_cluster)"
     echo "export BACKEND_REPO=$(repo backend/terraform)"
     echo "export BACKEND_LOG_GROUP=$(out backend/terraform log_group)"
@@ -844,8 +903,10 @@ terraform apply -input=false destroy.tfplan 2>&1 | tee -a "$REPO_ROOT/deploy-art
 echo "left in state: $(terraform state list | wc -l)"     # 0
 ```
 
-This takes about 5–10 minutes while Express Mode drains the service. The
-shared ALB stays up, because the API still uses it.
+This takes about 10–20 minutes: CloudFront disables, then deletes the edge
+distribution, and Express Mode drains the service. The shared ALB stays up,
+because the API still uses it. The processed bucket's policy goes with this
+stack, so the bucket has no reader left.
 
 ### 11.4 Backend stack
 
@@ -939,7 +1000,6 @@ terraform plan -destroy -input=false -out=destroy.tfplan \
 ```
 
 Then apply it in the background. It takes 10–20 minutes:
-- the playback CloudFront distribution;
 - ElastiCache Serverless;
 - the S3 buckets, which are emptied by `force_destroy`. This is slow when
   they hold many objects.
@@ -969,6 +1029,16 @@ for c in "$BACKEND_CLUSTER" "$PIPELINE_CLUSTER"; do
 done
 for g in "$BACKEND_LOG_GROUP" "$FRONTEND_LOG_GROUP" "$TRANSCODER_LOG_GROUP" "/aws/lambda/$LAMBDA_NAME"; do
   aws logs delete-log-group --log-group-name "$g" 2>/dev/null && echo "deleted $g"
+done
+true
+```
+
+**The playback signing key** (§4.1) lives in SSM, outside Terraform:
+
+```bash
+source deploy-artifacts/env.sh
+for n in private public; do
+  aws ssm delete-parameter --name "/video-backend/media-signing/$n" 2>/dev/null && echo "deleted $n key"
 done
 true
 ```
@@ -1016,8 +1086,9 @@ for q in $QUEUE_URLS; do
 done
 gone "Cognito user pool"     "$USER_POOL_ID" aws cognito-idp describe-user-pool --user-pool-id "$USER_POOL_ID"
 gone "SSM client secret"     "$PROJECT_NAME" aws ssm get-parameter --name "/$PROJECT_NAME/cognito/client-secret"
+gone "SSM signing key"       "media-signing" aws ssm get-parameter --name "/video-backend/media-signing/public"
 echo "-- delivery and images"
-gone "CloudFront playback"   "$VIDEO_CDN_ID"  aws cloudfront get-distribution --id "$VIDEO_CDN_ID"
+gone "CloudFront edge"       "$EDGE_CDN_ID"   aws cloudfront get-distribution --id "$EDGE_CDN_ID"
 gone "CloudFront thumbnails" "$THUMBS_CDN_ID" aws cloudfront get-distribution --id "$THUMBS_CDN_ID"
 for r in "$FRONTEND_REPO" "$BACKEND_REPO" "$TRANSCODER_REPO"; do
   gone "ECR $r" "$r" aws ecr describe-repositories --repository-names "$r"

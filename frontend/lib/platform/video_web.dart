@@ -177,10 +177,16 @@ class _WebPlayerController extends PlayerController {
     if (!(ctor as JSObject).callMethod<JSBoolean>('isSupported'.toJS).toDart) {
       throw const _PlayerError('this browser has no Media Source support');
     }
+    final config = JSObject();
     // startPosition: the first segment fetched is the one to resume in.
-    final hls = start == null
-        ? ctor.callAsConstructor<JSObject>()
-        : ctor.callAsConstructor<JSObject>({'startPosition': start}.jsify());
+    if (start != null) config['startPosition'] = start.toJS;
+    // The CDN wants the signed playback cookies on every request. The app
+    // and media share an origin in production, where this changes nothing;
+    // it matters when the API (and so the media) is on another origin.
+    config['xhrSetup'] = ((JSObject xhr, JSString _) {
+      xhr['withCredentials'] = true.toJS;
+    }).toJS;
+    final hls = ctor.callAsConstructor<JSObject>(config);
     hls.callMethod<JSAny?>(
       'on'.toJS,
       'hlsError'.toJS,
@@ -210,6 +216,12 @@ class _WebPlayerController extends PlayerController {
       'on'.toJS,
       'error'.toJS,
       ((JSAny? _) => _fail('DASH stream error')).toJS,
+    );
+    // Cookies on every request, as for hls.js above (null: all types).
+    player.callMethod<JSAny?>(
+      'setXHRWithCredentialsForType'.toJS,
+      null,
+      true.toJS,
     );
     player.callMethod<JSAny?>('initialize'.toJS, _el, url.toJS, false.toJS);
     _dash = player;
