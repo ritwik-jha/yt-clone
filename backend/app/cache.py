@@ -2,8 +2,11 @@
 
 Only videos anyone may watch (COMPLETED and not PRIVATE) are cached, so a hit
 never needs an ownership check. The hash carries the spec's fields plus the
-few the detail response needs beyond them (hls_url, visibility,
-duration_seconds, created_at, creator_id, creator_created_at).
+few the detail response needs beyond them (visibility, duration_seconds,
+created_at, creator_id, creator_created_at). It holds the S3 keys rather than
+URLs, and the URLs are built on read (app/video_views.py), so a change to
+MEDIA_BASE_URL or THUMBNAILS_CDN_DOMAIN applies to cached videos at once.
+Entries written in the older URL form miss and are rewritten.
 
 PATCH and DELETE /video/{video_id} drop the key after they commit. Any other
 path that changes a cached field must do the same.
@@ -21,7 +24,9 @@ from pydantic import ValidationError
 
 from app.clients import redis_client
 from app.config import get_settings
+from app.models import Video
 from app.schemas import CreatorDetail, VideoDetail
+from app.video_views import manifest_url, thumbnail_url
 
 log = logging.getLogger(__name__)
 
@@ -44,10 +49,9 @@ def get_video(video_id: UUID) -> Optional[VideoDetail]:
             id=data["id"],
             title=data["title"],
             description=data["description"] or None,
-            thumbnail_url=data["thumbnail_url"],
-            manifest_url=data["manifest_url"] or None,
-            # .get: entries written before HLS output have no such field.
-            hls_url=data.get("hls_url") or None,
+            thumbnail_url=thumbnail_url(data["thumbnail_key"]),
+            manifest_url=manifest_url(data["manifest_key"]),
+            hls_url=manifest_url(data["hls_key"]),
             views_count=int(data["views_count"]),
             duration_seconds=int(data["duration_seconds"]) if data["duration_seconds"] else None,
             created_at=data["created_at"],
@@ -64,22 +68,23 @@ def get_video(video_id: UUID) -> Optional[VideoDetail]:
         return None
 
 
-def put_video(video: VideoDetail) -> None:
+def put_video(video: Video) -> None:
+    """Needs `video.user` loaded."""
     mapping = {
         "id":                 str(video.id),
         "title":              video.title,
         "description":        video.description or "",
-        "thumbnail_url":      video.thumbnail_url,
-        "manifest_url":       video.manifest_url or "",
-        "hls_url":            video.hls_url or "",
-        "creator_name":       video.creator.name,
+        "thumbnail_key":      video.thumbnail_s3_key,
+        "manifest_key":       video.dash_manifest_s3_key or "",
+        "hls_key":            video.hls_manifest_s3_key or "",
+        "creator_name":       video.user.name,
         "status":             video.status.value,
         "views_count":        str(video.views_count),
         "visibility":         video.visibility.value,
         "duration_seconds":   "" if video.duration_seconds is None else str(video.duration_seconds),
         "created_at":         video.created_at.isoformat(),
-        "creator_id":         str(video.creator.id),
-        "creator_created_at": video.creator.created_at.isoformat(),
+        "creator_id":         str(video.user.id),
+        "creator_created_at": video.user.created_at.isoformat(),
     }
     key = _key(video.id)
     try:

@@ -149,7 +149,6 @@ fi
 COGNITO_POOL="$(require COGNITO_USER_POOL_ID "$(pipeline_out cognito_user_pool_id)")"
 COGNITO_CLIENT="$(require COGNITO_CLIENT_ID "$(pipeline_out cognito_user_pool_client_id)")"
 COGNITO_SECRET="$(require COGNITO_CLIENT_SECRET "$(pipeline_out cognito_user_pool_client_secret)")"
-CLOUDFRONT="$(require CLOUDFRONT_DOMAIN "$(pipeline_out cloudfront_domain_name)")"
 
 # The thumbnails distribution belongs to the backend stack. A placeholder only
 # breaks thumbnail URLs rather than sending uploads anywhere, so warn and go on.
@@ -218,8 +217,16 @@ REDIS_PROGRESS_PREFIX=${REDIS_PREFIX:-$(carried REDIS_PROGRESS_PREFIX)}
 REDIS_META_PREFIX=$(carried REDIS_META_PREFIX)
 VIDEO_META_CACHE_TTL_SECONDS=$(carried VIDEO_META_CACHE_TTL_SECONDS)
 
-# --- CloudFront (playback: processed bucket; thumbnails: backend stack) ---
-CLOUDFRONT_DOMAIN=${CLOUDFRONT}
+# --- Playback media (app/media_signing.py) ---
+# Deployed streams sit behind the edge distribution's signed cookies, which a
+# local API can't set for that domain: watch them on the deployed app. With
+# no key here, POST /video/{id}/playback answers expires_at null.
+MEDIA_BASE_URL=$(carried MEDIA_BASE_URL)
+MEDIA_KEY_PAIR_ID=$(carried MEDIA_KEY_PAIR_ID)
+MEDIA_PRIVATE_KEY=$(carried MEDIA_PRIVATE_KEY)
+MEDIA_COOKIE_TTL_SECONDS=$(carried MEDIA_COOKIE_TTL_SECONDS)
+
+# --- CloudFront (thumbnails: backend stack) ---
 THUMBNAILS_CDN_DOMAIN=${THUMB_CDN}
 EOF
 

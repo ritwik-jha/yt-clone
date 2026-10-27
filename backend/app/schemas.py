@@ -213,6 +213,11 @@ class ProgressResponse(BaseModel):
     status: VideoStatus
 
 
+class PlaybackResponse(BaseModel):
+    # When the signed cookies stop working; null when the API doesn't sign.
+    expires_at: Optional[datetime] = None
+
+
 # ---------- Watch history ----------
 # Longest position or duration the API accepts: one day of video.
 MAX_MEDIA_SECONDS = 86_400

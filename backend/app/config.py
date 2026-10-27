@@ -65,8 +65,22 @@ class Settings(BaseSettings):
     redis_meta_prefix: str = "video:meta"
     video_meta_cache_ttl_seconds: int = 3600
 
-    # CloudFront domains the API builds playback and thumbnail URLs from.
-    cloudfront_domain: str = ""
+    # Playback media. manifest_url and hls_url are MEDIA_BASE_URL + "/" +
+    # the S3 key. The default is a path on the app's own origin: the edge
+    # CloudFront distribution sends /media/* to the processed bucket
+    # (frontend/terraform/cloudfront.tf), so clients resolve the URL against
+    # the API's base URL.
+    media_base_url: str = "/media"
+    # CloudFront signed cookies for that media (app/media_signing.py). The
+    # key pair id is the CloudFront public key's id; the private key is its
+    # PEM, injected from SSM on ECS. Both empty: POST /video/{id}/playback
+    # sets no cookies, for local runs against unsigned media.
+    media_key_pair_id: str = ""
+    media_private_key: str = ""
+    media_cookie_ttl_seconds: int = 3600
+
+    # CloudFront domain the API builds thumbnail URLs from. Thumbnails stay
+    # public, like YouTube's.
     thumbnails_cdn_domain: str = ""
 
     def require(self, *names: str) -> None:

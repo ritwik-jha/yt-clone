@@ -19,7 +19,12 @@ def thumbnail_url(key: str) -> str:
 
 
 def manifest_url(key: str | None) -> str | None:
-    return f"https://{get_settings().cloudfront_domain}/{key}" if key else None
+    """MEDIA_BASE_URL + key: by default `/media/<key>`, relative to the API's
+    origin, where the edge distribution serves it to holders of the signed
+    cookies from POST /video/{id}/playback."""
+    if not key:
+        return None
+    return f"{get_settings().media_base_url.rstrip('/')}/{key.lstrip('/')}"
 
 
 def feed_fields(video: Video) -> dict:
