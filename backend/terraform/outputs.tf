@@ -4,7 +4,8 @@ output "aws_region" {
 
 output "api_url" {
   description = "HTTPS endpoint Express Mode assigned to the API (ALB, AWS-issued certificate)."
-  value       = try("https://${aws_ecs_express_gateway_service.api.ingress_paths[0].endpoint}", null)
+  # Newer provider versions return the endpoint with its scheme already.
+  value = try("https://${trimprefix(aws_ecs_express_gateway_service.api.ingress_paths[0].endpoint, "https://")}", null)
 }
 
 output "ecs_cluster" {
