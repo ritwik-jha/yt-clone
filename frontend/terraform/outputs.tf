@@ -1,6 +1,7 @@
 output "frontend_url" {
   description = "The web app (HTTPS, AWS-issued certificate). The API is served on the same origin."
-  value       = try("https://${aws_ecs_express_gateway_service.frontend.ingress_paths[0].endpoint}", null)
+  # Newer provider versions return the endpoint with its scheme already.
+  value = try("https://${trimprefix(aws_ecs_express_gateway_service.frontend.ingress_paths[0].endpoint, "https://")}", null)
 }
 
 output "api_url" {
