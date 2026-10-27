@@ -28,6 +28,7 @@ them (`frontend/AGENTS.md`).
 | Doc | Covers |
 |---|---|
 | [`video-streaming-scaling-and-bottlenecks.md`](architecture/video-streaming-scaling-and-bottlenecks.md) | Where the pipeline breaks under load, and designs to scale it. Mostly not built. |
+| [`private-media-delivery.md`](architecture/private-media-delivery.md) | Why streams are served behind CloudFront signed cookies on one edge distribution, how it works, and what it does and doesn't protect. Built. |
 
 ## `plans/` — feature plans
 

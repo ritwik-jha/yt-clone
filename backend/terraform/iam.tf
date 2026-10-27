@@ -1,7 +1,8 @@
 # Five roles, one job each:
 #
 #   api_execution / poller_execution   ECS agent: pull image, write logs
-#                                      (+ the API's reads its Cognito secret)
+#                                      (+ the API's reads its Cognito secret
+#                                      and media signing key)
 #   api_task / poller_task             application code inside the container
 #   express_infrastructure             ECS Express Mode: manages the API's ALB,
 #                                      target group, SGs, cert, autoscaling
@@ -57,14 +58,17 @@ data "aws_iam_policy_document" "execution_common" {
 data "aws_iam_policy_document" "api_execution" {
   source_policy_documents = [data.aws_iam_policy_document.execution_common.json]
 
-  # Injects COGNITO_CLIENT_SECRET via the container `secrets` mechanism. The
-  # parameter uses the AWS-managed aws/ssm key, which needs no kms:Decrypt
-  # grant on the execution role.
+  # Injects COGNITO_CLIENT_SECRET and MEDIA_PRIVATE_KEY via the container
+  # `secrets` mechanism. Both parameters use the AWS-managed aws/ssm key,
+  # which needs no kms:Decrypt grant on the execution role.
   statement {
-    sid       = "ReadCognitoClientSecret"
-    effect    = "Allow"
-    actions   = ["ssm:GetParameters"]
-    resources = [local.pipeline.cognito_client_secret_parameter_arn]
+    sid     = "ReadContainerSecrets"
+    effect  = "Allow"
+    actions = ["ssm:GetParameters"]
+    resources = [
+      local.pipeline.cognito_client_secret_parameter_arn,
+      local.media_private_key_parameter_arn,
+    ]
   }
 }
 

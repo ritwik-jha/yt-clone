@@ -221,7 +221,8 @@ Retrieves a paginated list of publicly available, fully processed videos for the
 | `title` | String | Title of the video |
 | `description` | String | Short video description |
 | `thumbnail_url` | String (URL) | CloudFront CDN URL for thumbnail rendering |
-| `manifest_url` | String (URL) | CloudFront CDN URL for MPEG-DASH streaming manifest (`.mpd`) |
+| `manifest_url` | String (URL) | MPEG-DASH manifest (`.mpd`), `/media/<key>` relative to the API's origin; streamable after `POST /video/{video_id}/playback` (§3.2a) |
+| `hls_url` | String (URL) | HLS master playlist over the same segments, same form; null for videos transcoded before HLS output |
 | `views_count` | Integer | Total accumulated view count |
 | `duration_seconds` | Integer | Total playback duration in seconds |
 | `creator` | Object | Creator details (`id`, `name`) |
@@ -258,6 +259,29 @@ Fetches detailed metadata and streaming manifest URLs for a single video.
 
 #### Response Body Schema (200 OK)
 Returns the complete Feed Item Object Schema along with full creator details and status flags.
+
+---
+
+### 3.2a Authorize Playback (`POST /video/{video_id}/playback`)
+Lets the caller's browser stream the video for a while. The stream URLs are served by the edge CloudFront distribution under `/media/`, which refuses every request without CloudFront signed cookies; this endpoint sets them, for the folder holding the video's manifests and segments only.
+
+* **HTTP Method**: `POST`
+* **Path**: `/video/{video_id}/playback`
+* **Authentication**: Optional, as for `GET /video/{video_id}`: anyone may stream a `PUBLIC` or `UNLISTED` video, only the owner a `PRIVATE` one
+
+#### Response Cookies (`Set-Cookie` Headers)
+* `CloudFront-Policy`, `CloudFront-Signature`, `CloudFront-Key-Pair-Id`: `HttpOnly; Secure; SameSite=Lax; Path=/media/<folder>/; Max-Age=3600` (the TTL is `MEDIA_COOKIE_TTL_SECONDS`). The policy's resource is `https://*/<folder>/*` and it expires with the cookies.
+
+#### Response Body Schema (200 OK)
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `expires_at` | ISO-8601 (UTC), nullable | When the cookies stop working; clients renew a few minutes before. Null when the API has no signing key (local runs) |
+
+The response carries `Cache-Control: no-store`.
+
+#### Error Responses
+* `404 video_not_found`: no such video, or the caller may not read it.
+* `409 video_not_ready`: not `COMPLETED` yet.
 
 ---
 
@@ -418,8 +442,7 @@ Redis is deployed as an in-memory caching layer to eliminate redundant relationa
   * `id`: Video UUID string.
   * `title`: Video title string.
   * `description`: Video description string.
-  * `thumbnail_url`: Full CloudFront CDN URL for thumbnail image.
-  * `manifest_url`: Full CloudFront CDN URL for DASH master manifest file.
+  * `thumbnail_key`, `manifest_key`, `hls_key`: the S3 keys. The URLs are built from them on read, so a change of CDN or media base applies to cached videos at once.
   * `creator_name`: Display name of video creator.
   * `status`: Current video status string (`COMPLETED`).
   * `views_count`: Cached view count string integer.

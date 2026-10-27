@@ -10,7 +10,7 @@ services built from one image:
 
 **This guide assumes the transcoding pipeline is already deployed.** Run
 `IAC/deployment-guide.md` to completion first — every pipeline value the
-backend needs (queue URL, Redis endpoint, raw bucket, CloudFront domain,
+backend needs (queue URL, Redis endpoint, raw and processed buckets,
 Cognito, VPC and subnets) is read out of that stack's Terraform state. The
 database is this stack's own RDS PostgreSQL instance.
 
@@ -36,10 +36,17 @@ pipeline resources, apart from adding one ingress rule to the Redis SG.
 | S3 thumbnails bucket (+ CORS) | `storage.tf` |
 | CloudFront distribution + OAC for the thumbnails bucket | `cloudfront.tf` |
 | CloudWatch log group `/video-backend` | `logs.tf` |
+| CloudFront public key + key group for the playback cookies (the key pair itself lives in SSM, see below) | `media_signing.tf` |
 
 Created by the **pipeline** stack and only referenced here: the Cognito user
-pool and app client, the SSM SecureString holding the Cognito client secret,
-and the CloudFront distribution in front of the processed bucket.
+pool and app client, and the SSM SecureString holding the Cognito client
+secret. The processed bucket is served by the edge distribution in
+`frontend/terraform/cloudfront.tf`, which trusts this stack's key group.
+
+Created **by hand, once** and only referenced here: the playback signing
+key pair, as SSM parameters `/video-backend/media-signing/private`
+(SecureString) and `.../public` (String). `DEPLOY_AWS.md` §4.1 has the
+openssl commands; the plan fails with `ParameterNotFound` until they exist.
 
 ### Roles
 
@@ -65,8 +72,9 @@ There is no `.env` in production. `ecs.tf` builds each service's environment
 from the two stacks' state:
 
 - non-secret values (database host and name, bucket names, Redis host,
-  CloudFront domains, cookie and CORS policy) are plain task environment
-  variables;
+  the thumbnails CloudFront domain, `MEDIA_BASE_URL=/media` and the
+  CloudFront key pair id, cookie and CORS policy) are plain task
+  environment variables;
 - `COGNITO_CLIENT_SECRET` is injected at task start from the pipeline's SSM
   SecureString, by the API execution role;
 - the database password is never in the environment. Both services get
@@ -83,8 +91,9 @@ the code locally against the deployed resources.
 
 ## 3. Prerequisites
 
-- Pipeline stack applied (`IAC/terraform`) with the CloudFront and Cognito
+- Pipeline stack applied (`IAC/terraform`) with the Cognito
   secret-parameter changes, and its state file reachable.
+- The playback signing key pair in SSM (above).
 - Terraform ≥ 1.5 with AWS provider 6.x (the stack pins `~> 6.23`), AWS CLI
   v2, Docker with `buildx`, `jq`.
 - The operator IAM identity needs, beyond the usual ECS/IAM/EC2 rights, the
@@ -202,17 +211,20 @@ pipeline smoke test, has no `videos` row and never shows up here):
 4. `GET /video/{id}/progress` moves to `PROCESSING` with a rising percentage
    while the Fargate transcoder runs, then reports `COMPLETED` and 100.
 5. `GET /video/{id}` returns `manifest_url`
-   (`https://dxxxx.cloudfront.net/<uuid from s3_key>/dash/manifest.mpd`),
-   `hls_url` (`.../dash/master.m3u8`), `thumbnail_url`, and
+   (`/media/<uuid from s3_key>/dash/manifest.mpd`, relative to the app's
+   origin), `hls_url` (`.../dash/master.m3u8`), `thumbnail_url`, and
    `duration_seconds`. A PUBLIC video also appears in `GET /video/feed`.
+   `POST /video/{id}/playback` sets the CloudFront signed cookies for
+   `/media/<uuid>/dash/` and returns `expires_at`.
 6. `POST /video/{id}/view` returns 204 and `views_count` goes up by one
    (a cached `GET /video/{id}` may show the old count until its TTL).
 
 Point a DASH player (dash.js, Shaka, ExoPlayer) at `manifest_url`, or
-AVPlayer / Safari at `hls_url`; both manifests reference the same fMP4
-segments. CloudFront serves them from the private bucket via OAC, with CORS
-headers added at the edge. Thumbnails come from this stack's own
-distribution the same way. `hls_url` is null for videos transcoded before
+AVPlayer / Safari at `hls_url`, resolved against the app's origin and after
+`POST /video/{id}/playback`; both manifests reference the same fMP4
+segments. The edge distribution (`frontend/terraform`) serves them from the
+private bucket via OAC, only with those cookies: without them every request
+is a 403. Thumbnails come from this stack's own distribution, publicly. `hls_url` is null for videos transcoded before
 the transcoder wrote HLS; re-upload them to get one.
 
 If a video stays `PENDING`, check the poller log stream. `no row yet ...
@@ -307,9 +319,10 @@ so run `aws ecr batch-delete-image` if the repo blocks the destroy.
   replicas are safe (the guarded UPDATEs and the parked-result upsert are
   idempotent) but unnecessary.
 - **Deletes are not instant at the edge.** `DELETE /video/{id}` removes the
-  row at once and the S3 objects right after the response, but CloudFront
-  keeps serving cached manifests, segments, and thumbnails until their TTL
-  runs out. S3 failures are logged (`deleting s3://...`) and leave orphaned
+  row at once and the S3 objects right after the response, so nobody gets
+  new playback cookies for it. But CloudFront keeps serving cached
+  manifests and segments to cookies already issued (at most
+  `media_cookie_ttl_seconds`), and thumbnails until their TTL runs out. S3 failures are logged (`deleting s3://...`) and leave orphaned
   objects; the row is gone either way.
 - **Deleting mid-transcode.** If a video is deleted while the transcoder is
   still running, the transcoder keeps writing to the processed bucket after

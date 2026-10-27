@@ -28,9 +28,12 @@ settings = get_settings()
 settings.require(
     "cognito_user_pool_id", "cognito_client_id", "cognito_client_secret",
     "s3_raw_videos_bucket", "s3_thumbnails_bucket", "s3_processed_bucket",
-    "redis_host", "cloudfront_domain", "thumbnails_cdn_domain",
+    "redis_host", "thumbnails_cdn_domain",
 )
 settings.require_database()
+if not (settings.media_key_pair_id and settings.media_private_key):
+    # Fine locally; behind the edge distribution every stream would 403.
+    log.warning("MEDIA_KEY_PAIR_ID / MEDIA_PRIVATE_KEY unset: playback sets no signed cookies")
 
 app = FastAPI(title="Video Platform Backend", version="2.0.0")
 

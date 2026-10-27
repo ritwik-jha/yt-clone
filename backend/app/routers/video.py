@@ -8,7 +8,9 @@ Edit and delete are owner-only and answer 404 to everyone else for the same
 reason. The feed, search, and channel pages list PUBLIC + COMPLETED only.
 
 Playback and thumbnail URLs are derived from the stored S3 keys at read time,
-so moving a CloudFront distribution needs no data migration.
+so moving a CloudFront distribution needs no data migration. The stream
+itself is only served to holders of the signed cookies POST
+/video/{id}/playback sets (app/media_signing.py).
 
 No handler here writes `status`: the completion poller owns every transition
 after POST /upload/video/save.
@@ -25,7 +27,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Respons
 from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
-from app import cache
+from app import cache, media_signing
 from app.clients import redis_client, s3
 from app.config import get_settings
 from app.db import get_db
@@ -34,7 +36,7 @@ from app.errors import APIError
 from app.models import User, Video, VideoStatus, Visibility
 from app.schemas import (
     ChannelResponse, CreatorDetail, FeedResponse, MyVideosResponse,
-    ProgressResponse, UpdateVideoRequest, VideoDetail,
+    PlaybackResponse, ProgressResponse, UpdateVideoRequest, VideoDetail,
 )
 from app.video_views import feed_fields, to_feed_item
 
@@ -248,7 +250,7 @@ def get_video(video_id: UUID, request: Request, db: Session = Depends(get_db)):
     video = _load_for_viewer(db, video_id, request)
     detail = _to_detail(video)
     if _publicly_viewable(video):
-        cache.put_video(detail)
+        cache.put_video(video)
     return detail
 
 
@@ -312,3 +314,34 @@ def record_view(video_id: UUID, request: Request, db: Session = Depends(get_db))
     )
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{video_id}/playback", response_model=PlaybackResponse)
+def authorize_playback(
+    video_id: UUID, request: Request, response: Response, db: Session = Depends(get_db),
+):
+    """Let this browser stream the video: sets the CloudFront signed cookies
+    for the folder holding its manifests and segments, valid for
+    MEDIA_COOKIE_TTL_SECONDS. Anyone who may read the video may stream it,
+    signed in or not.
+
+    The player calls it before opening the stream, again before
+    `expires_at`, and once more if the CDN answers 403. `expires_at` is null
+    when the API has no signing key (local runs against unsigned media)."""
+    video = _load_for_viewer(db, video_id, request)
+    folder = media_signing.media_folder(video.dash_manifest_s3_key, video.hls_manifest_s3_key)
+    if video.status != VideoStatus.COMPLETED or folder is None:
+        raise APIError(409, "video_not_ready", "Video is not ready to play")
+    # Per-viewer cookies: never cached by the edge or the browser.
+    response.headers["Cache-Control"] = "no-store"
+    signed = media_signing.sign_cookies(folder)
+    if signed is None:
+        return PlaybackResponse(expires_at=None)
+    s = get_settings()
+    for name, value in signed.values.items():
+        response.set_cookie(
+            name, value,
+            max_age=s.media_cookie_ttl_seconds, path=signed.path,
+            httponly=True, secure=s.cookie_secure, samesite=s.cookie_samesite,
+        )
+    return PlaybackResponse(expires_at=signed.expires_at)

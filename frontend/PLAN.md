@@ -128,7 +128,7 @@ In every row the backend's behaviour wins, and the app is built to match it.
 | 13 | Save response | Expects 200 (upload guide) | 201 `{id, title, status, visibility, created_at}`; 409 if the upload was already saved | Keeps `id` for progress polling, and treats 409 as already saved |
 | 14 | Visibility values | `public`, `private`, `unlisted` | Case-insensitive on input, uppercase in responses | Sends uppercase |
 | 15 | Thumbnail display | `Image.network` with custom headers | `thumbnail_url` is a complete public CloudFront URL | Plain GET with no headers |
-| 16 | Manifest URL | Built on the client as `https://{cloudfront}/{video_s3_key}/manifest.mpd` | `manifest_url` (DASH, `https://<cf>/<uuid>/dash/manifest.mpd`) and `hls_url` (`.../dash/master.m3u8`) come in the response, and are null until COMPLETED | Uses the URL for its platform (D10) and never builds URLs |
+| 16 | Manifest URL | Built on the client as `https://{cloudfront}/{video_s3_key}/manifest.mpd` | `manifest_url` (DASH, `/media/<uuid>/dash/manifest.mpd`, relative to the API's origin) and `hls_url` (`.../dash/master.m3u8`) come in the response, and are null until COMPLETED. The edge distribution serves them only with the signed cookies from `POST /video/{id}/playback` (`docs/architecture/private-media-delivery.md`) | Uses the URL for its platform (D10), resolved against the API's base URL, after `POST /video/{id}/playback`; never builds URLs |
 | 17 | Renditions and segments | 360p / 720p / 1080p, 6 s segments, 16:9 | 1080p / 720p / 480p bounding boxes, scaled to fit with the source's aspect ratio kept (a portrait source gives 608x1080, 404x720, 270x480); 4 s segments | Takes quality labels and the aspect ratio from the stream |
 | 18 | S3 upload body | `file.readAsBytes()` | — | Streams from the file with `Content-Length`, so a 1 GB video isn't held in memory |
 | 19 | Base URL | Hard-coded `http://192.168.1.10:8000` | — | `API_BASE_URL` from dart-define |
@@ -1318,8 +1318,10 @@ _controller.addEventsListener((event) {
 The page wraps the player in an `AspectRatio(aspectRatio: _aspectRatio)`
 inside a `ConstrainedBox` capped at 60% of the screen height (§6.6).
 
-On native platforms CloudFront needs nothing from the app: no signing, no
-headers, no CORS.
+On native platforms the app must call `POST /video/{id}/playback` first and
+pass the three `CloudFront-*` cookies it sets to the player as a `Cookie`
+header on the data source (native players don't share the HTTP client's
+cookie jar), and renew them before `expires_at`. No CORS.
 
 ### 8.3 The iOS path (B1, built)
 

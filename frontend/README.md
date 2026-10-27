@@ -68,7 +68,8 @@ lib/
 ├── services/                 AuthService, VideoService, UploadVideoService,
 │                             watch history: HistoryService, HistorySync,
 │                             HistoryOutbox, WatchProgressStore,
-│                             ProgressTracker
+│                             ProgressTracker; PlaybackAccess (the
+│                             signed CDN cookies a stream needs)
 ├── cubits/                   session, auth, feed (+search), channel,
 │                             my_videos, video_detail, upload_video, history
 ├── pages/                    shell (masthead, guide), home, search, watch,
@@ -93,6 +94,13 @@ integration_test/             browser E2E against the seeded test backend
 - Playback: HLS through hls.js (Chrome, Edge, Firefox) or natively (Safari);
   DASH through dash.js only for videos transcoded before the pipeline wrote
   HLS. The libraries load on the first watch page, from `web/vendor/`.
+- Streams are private: the CDN serves `/media/...` only with the CloudFront
+  signed cookies `POST /video/{id}/playback` sets for that one video, for an
+  hour. The watch page (`PlaybackAccess`) asks for them before it opens the
+  stream and again 5 minutes before they expire. If the stream fails anyway
+  (the tab slept past the expiry), it gets fresh cookies and reopens where
+  it stopped, at most once a minute. Stream URLs come from the API relative
+  to its origin and are resolved against `API_BASE_URL` (or the page).
 - Uploads stream the picked `File` straight from the browser to the
   presigned S3 URL (no copy into Dart memory). The upload belongs to the app,
   not the page: it keeps going while you browse, the masthead's upload

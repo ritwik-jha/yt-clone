@@ -1,9 +1,11 @@
 # AGENTS.md — terraform
 
 Provisions the full pipeline infra. Single `terraform apply` stands up
-network, storage, queues, cache, container platform, dispatcher, Cognito,
-and the CloudFront playback distribution. The application database (RDS
-PostgreSQL) belongs to `../../backend/terraform`, not here.
+network, storage, queues, cache, container platform, dispatcher, and
+Cognito. The application database (RDS PostgreSQL) belongs to
+`../../backend/terraform`, and the CDN that serves the processed bucket
+(with its bucket policy) to `../../frontend/terraform/cloudfront.tf`, not
+here.
 
 ## Files
 
@@ -15,12 +17,11 @@ PostgreSQL) belongs to `../../backend/terraform`, not here.
 | `storage.tf` | S3 raw + processed buckets (public-access blocked, force_destroy on), CORS on raw, SQS ingest queue + DLQ (redrive), SQS completion queue + DLQ, SQS→S3 send-message policy, `aws_s3_bucket_notification` filter `suffix=.mp4` |
 | `redis.tf` | `aws_elasticache_serverless_cache` (engine=valkey, v7), 5 GB / 5000 eCPU limits, in redis SG + module subnets, locals expose `redis_address` / `redis_port` / `redis_uri` |
 | `cognito.tf` | User pool (`username_attributes=["email"]`, required `email`/`name` schema) + confidential app client (secret, `USER_PASSWORD_AUTH`, `prevent_user_existence_errors`) + SSM SecureString `/<project>/cognito/client-secret` for the backend API task |
-| `cloudfront.tf` | OAC (sigv4), distribution in front of the processed bucket (managed CachingOptimized + SimpleCORS policies, HTTPS redirect, default cert), processed bucket policy allowing only this distribution |
 | `ecr.tf` | Private ECR repo, scan-on-push, 10-image lifecycle |
 | `iam.tf` | ECS task-execution role (managed policy), ECS task role (S3 R/W on the two buckets + SendMessage on completion queue), Lambda dispatcher role (SQS receive/delete on ingest, `ecs:RunTask` on task family `:*`, `iam:PassRole` scoped by `iam:PassedToService=ecs-tasks`) |
 | `ecs.tf` | CW log group, cluster (containerInsights on), task definition with runtimePlatform, env carries Redis + completion queue coordinates |
 | `lambda.tf` | `archive_file` bundles `../lambda/`, `aws_lambda_function` (python3.12, 256 MB, 30s), CW log group, `aws_lambda_event_source_mapping` on ingest queue (batch_size, batch_window, `ReportBatchItemFailures`) |
-| `outputs.tf` | Every consumer input the backend / operator needs: VPC id + CIDR, subnet ids, bucket names, queue URLs+ARNs, redis endpoint, ECR URL, cluster name, task def ARN, lambda name, Cognito pool/client ids (client secret marked `sensitive`), client-secret parameter ARN, CloudFront domain + distribution id |
+| `outputs.tf` | Every consumer input the backend / operator needs: VPC id + CIDR, subnet ids, bucket names, queue URLs+ARNs, redis endpoint, ECR URL, cluster name, task def ARN, lambda name, Cognito pool/client ids (client secret marked `sensitive`), client-secret parameter ARN, the processed bucket's regional domain (the edge distribution's S3 origin) |
 | `terraform.tfvars.example` | Copy → `terraform.tfvars`, fill required values |
 
 ## Conventions
@@ -53,9 +54,12 @@ PostgreSQL) belongs to `../../backend/terraform`, not here.
   reads it. Keep state access as restricted as the `.env` file itself.
   The same value is written to an SSM SecureString, which is what the ECS
   API task reads.
-- **The processed bucket is private.** Clients read DASH and HLS output only through
-  CloudFront. The bucket policy trusts `cloudfront.amazonaws.com` conditioned
-  on this distribution's ARN. Don't add public-read or a website endpoint.
+- **The processed bucket is private.** Clients read DASH and HLS output only
+  through the edge distribution, and only with CloudFront signed cookies.
+  Its bucket policy lives in `../../frontend/terraform/cloudfront.tf` and
+  trusts `cloudfront.amazonaws.com` conditioned on that distribution's ARN;
+  don't add an `aws_s3_bucket_policy` for it here (two would overwrite each
+  other). Don't add public-read or a website endpoint.
 
 ## Adding a new resource
 

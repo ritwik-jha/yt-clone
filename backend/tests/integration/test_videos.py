@@ -18,7 +18,7 @@ def test_feed_lists_public_completed_newest_first(anon):
     first = body["items"][0]
     assert first["creator"] == {"id": str(seed_data.ALICE.id), "name": seed_data.ALICE.name}
     assert first["thumbnail_url"].startswith("https://thumbs.test/thumbnails/")
-    assert first["hls_url"].endswith("/master.m3u8")
+    assert first["hls_url"] == f"/media/{seed_data.FEED[0].stem}/master.m3u8"
 
 
 def test_feed_pagination_and_limits(anon):

@@ -42,6 +42,20 @@ check "region_matches_pipeline" {
   }
 }
 
+check "backend_has_media_key_group" {
+  assert {
+    condition     = try(local.backend.media_key_group_id, "") != ""
+    error_message = "The backend stack has no media_key_group_id output yet. Apply backend/terraform first (DEPLOY_AWS.md §4)."
+  }
+}
+
+check "pipeline_has_processed_origin" {
+  assert {
+    condition     = try(local.pipeline.processed_bucket_regional_domain_name, "") != ""
+    error_message = "The pipeline stack has no processed_bucket_regional_domain_name output yet. Re-apply IAC/terraform first."
+  }
+}
+
 check "backend_has_api_url" {
   assert {
     condition     = startswith(try(local.backend.api_url, ""), "https://")
