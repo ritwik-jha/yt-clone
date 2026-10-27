@@ -1,8 +1,9 @@
 # The web app as an ECS Express Mode service in the backend's cluster.
 # Express Mode gives it an internet-facing HTTPS ALB with an AWS-issued
-# certificate and a *.on.aws URL. nginx serves the Flutter build and forwards
-# /auth/, /video/, /upload/ and /healthz to the API, so the app and API share
-# one origin: first-party SameSite=Lax cookies, no CORS on the API.
+# certificate and a *.on.aws URL; viewers come in through the edge
+# distribution in cloudfront.tf. nginx serves the Flutter build and forwards
+# the API paths to the API, so the app and API share one origin:
+# first-party SameSite=Lax cookies, no CORS on the API.
 resource "aws_ecs_express_gateway_service" "frontend" {
   service_name            = var.frontend_name
   cluster                 = local.backend.ecs_cluster

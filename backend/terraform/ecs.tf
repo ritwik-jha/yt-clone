@@ -7,8 +7,8 @@
 #           completion queue; SQS redelivery covers task restarts.
 #
 # Config arrives as task environment built from both stacks' state — there is
-# no .env on the servers. The Cognito client secret is injected from SSM by
-# the API's execution role. The database password never reaches the task
+# no .env on the servers. The Cognito client secret and the media signing key
+# are injected from SSM by the API's execution role. The database password never reaches the task
 # definition: both task roles read it from the RDS-managed secret at runtime.
 
 resource "aws_ecs_cluster" "backend" {
@@ -32,6 +32,9 @@ locals {
     DB_SSLMODE    = "require"
   }
 
+  # MEDIA_BASE_URL: playback URLs are /media/<key> on the app's own origin,
+  # where the edge distribution (frontend/terraform/cloudfront.tf) serves
+  # them to holders of the signed cookies.
   api_environment = merge(local.db_environment, {
     AWS_REGION                   = var.aws_region
     APP_PORT                     = tostring(var.api_port)
@@ -48,7 +51,9 @@ locals {
     S3_THUMBNAILS_BUCKET         = aws_s3_bucket.thumbnails.bucket
     S3_PROCESSED_BUCKET          = local.pipeline.processed_bucket
     PRESIGNED_URL_TTL_SECONDS    = tostring(var.presigned_url_ttl_seconds)
-    CLOUDFRONT_DOMAIN            = local.pipeline.cloudfront_domain_name
+    MEDIA_BASE_URL               = "/media"
+    MEDIA_KEY_PAIR_ID            = aws_cloudfront_public_key.media.id
+    MEDIA_COOKIE_TTL_SECONDS     = tostring(var.media_cookie_ttl_seconds)
     THUMBNAILS_CDN_DOMAIN        = aws_cloudfront_distribution.thumbnails.domain_name
     REDIS_HOST                   = local.pipeline.redis_host
     REDIS_PORT                   = tostring(local.pipeline.redis_port)
@@ -109,6 +114,11 @@ resource "aws_ecs_express_gateway_service" "api" {
     secret {
       name       = "COGNITO_CLIENT_SECRET"
       value_from = local.pipeline.cognito_client_secret_parameter_arn
+    }
+
+    secret {
+      name       = "MEDIA_PRIVATE_KEY"
+      value_from = local.media_private_key_parameter_arn
     }
   }
 

@@ -259,6 +259,28 @@ variable "video_meta_cache_ttl_seconds" {
   default     = 3600
 }
 
+variable "media_signing_parameter_prefix" {
+  description = "SSM path holding the playback-cookie key pair: <prefix>/private (SecureString) and <prefix>/public (String). DEPLOY_AWS.md §4 creates them."
+  type        = string
+  default     = "/video-backend/media-signing"
+
+  validation {
+    condition     = can(regex("^/[A-Za-z0-9_./-]+[^/]$", var.media_signing_parameter_prefix))
+    error_message = "media_signing_parameter_prefix must start with / and not end with one."
+  }
+}
+
+variable "media_cookie_ttl_seconds" {
+  description = "How long the playback cookies from POST /video/{id}/playback open a video's stream. The web app renews them before they run out."
+  type        = number
+  default     = 3600
+
+  validation {
+    condition     = var.media_cookie_ttl_seconds >= 600 && var.media_cookie_ttl_seconds <= 86400
+    error_message = "media_cookie_ttl_seconds must be between 600 (the app renews 5 minutes early) and 86400."
+  }
+}
+
 variable "completion_poll_wait_seconds" {
   description = "SQS long-poll wait for the poller."
   type        = number

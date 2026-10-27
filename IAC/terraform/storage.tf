@@ -22,6 +22,9 @@ resource "aws_s3_bucket_cors_configuration" "raw" {
   }
 }
 
+# Transcoder output. Viewers reach it only through the edge distribution in
+# frontend/terraform/cloudfront.tf, which also owns this bucket's policy
+# (the distribution is created there, after this stack).
 resource "aws_s3_bucket" "processed" {
   bucket        = var.processed_bucket_name
   force_destroy = true

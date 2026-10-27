@@ -70,6 +70,17 @@ variable "max_tasks" {
   default     = 2
 }
 
+variable "cloudfront_price_class" {
+  description = "CloudFront price class for the edge distribution (web app and playback media). PriceClass_200 includes India edge locations."
+  type        = string
+  default     = "PriceClass_200"
+
+  validation {
+    condition     = contains(["PriceClass_100", "PriceClass_200", "PriceClass_All"], var.cloudfront_price_class)
+    error_message = "cloudfront_price_class must be PriceClass_100, PriceClass_200, or PriceClass_All."
+  }
+}
+
 variable "log_retention_days" {
   description = "CloudWatch retention for the nginx logs."
   type        = number
