@@ -98,3 +98,31 @@ def s3_key(video: SeedVideo) -> str:
 
 def thumbnail_key(video: SeedVideo) -> str:
     return f"thumbnails/{USERS_BY_KEY[video.owner].sub}/{video.stem}"
+
+
+@dataclass(frozen=True)
+class SeedHistory:
+    user: str
+    video: str
+    position: int
+    hours_ago: int
+
+    @property
+    def last_watched_at(self) -> datetime:
+        return _EPOCH - timedelta(hours=self.hours_ago)
+
+
+# Alice's watch history; Bob and Carol have none. `diary` is Alice's own
+# PRIVATE video, so it is in her history. Completion is derived the way the
+# API derives it (guitar is watched to the end).
+HISTORY = [
+    SeedHistory("alice", "mountains", 300, 1),
+    SeedHistory("alice", "timelapse", 8, 3),
+    SeedHistory("alice", "guitar", 1830, 26),
+    SeedHistory("alice", "diary", 60, 50),
+]
+
+# Alice's GET /history, most recently watched first.
+ALICE_HISTORY = sorted(
+    (h for h in HISTORY if h.user == "alice"), key=lambda h: h.last_watched_at, reverse=True,
+)

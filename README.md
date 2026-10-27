@@ -45,7 +45,7 @@ The client is a Flutter web app (dark, YouTube-style, from the Figma
     ├── specs/                     API + DB schema, screens, ECS task definition
     ├── guides/                    Early implementation guides (design rationale)
     ├── architecture/              Scaling analysis
-    └── plans/                     Feature plans: watch history, recommendations
+    └── plans/                     Feature plans: watch history (built), recommendations
 ```
 
 `backend/` is deliberately a sibling of `IAC/`, not a child: it is
@@ -219,8 +219,8 @@ transcoder image, x86_64 backend image.
 
 - `docs/architecture/video-streaming-scaling-and-bottlenecks.md` is
   forward-looking analysis of scaling limits; most of it is not built yet.
-- `docs/plans/` holds plans for features that are not built yet: watch
-  history, and recommendations (which builds on watch history).
+- `docs/plans/` holds feature plans: watch history (built), and
+  recommendations (not built yet; it builds on watch history).
 
 ---
 

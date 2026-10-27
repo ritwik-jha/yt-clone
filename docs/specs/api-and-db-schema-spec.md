@@ -261,6 +261,42 @@ Returns the complete Feed Item Object Schema along with full creator details and
 
 ---
 
+### 3.3 Watch History (`/history`)
+Per-user progress on each video, synced across browsers. Every route requires the `access_token` cookie (`401 missing_access_token` without it). The design and the sync rules are in `docs/plans/watch-history-plan.md`.
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `POST` | `/history/progress` | Record a batch of 1–50 progress reports |
+| `GET` | `/history` | The caller's history, most recently watched first (`limit` 1–50, default 20; opaque `cursor`) |
+| `GET` | `/history/positions` | The caller's progress on up to 50 videos (`video_ids`, comma-separated); videos with no entry are left out |
+| `DELETE` | `/history/{video_id}` | Remove one entry (`204`, also when there was none) |
+| `DELETE` | `/history` | Clear all of the caller's history (`204`) |
+
+#### Progress Report (`POST /history/progress` entries)
+| Field | Type | Required | Validation Rules | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `video_id` | UUID | Yes | | Video watched |
+| `position_seconds` | Integer | Yes | 0–86,400 | Position reached |
+| `duration_seconds` | Integer | No | 1–86,400 | Duration the player reported; the server's own duration wins when it has one |
+| `watched_at` | ISO-8601 | Yes | Must carry a timezone offset | When the browser observed the position |
+
+The server keeps, per (user, video), the report with the latest `watched_at` (clamped to the server clock), so a report that arrives late never overwrites newer progress from another browser. A video is `completed` at 95 % or with 10 s or less left.
+
+Each entry gets one result (`results`, one per distinct `video_id`, in request order): `saved`; `stale` (the server holds a newer observation, returned in `progress`); `not_found` (no such video, or the caller can't watch it); `expired` (`watched_at` more than 30 days old). One bad entry never fails the batch.
+
+#### Watch Progress Object Schema
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `video_id` | UUID | Video |
+| `position_seconds` | Integer | Last position, clamped to the duration |
+| `duration_seconds` | Integer (nullable) | Duration used for the completion rule |
+| `completed` | Boolean | Watched to the end |
+| `last_watched_at` | ISO-8601 (UTC) | Observation time of the stored progress |
+
+`GET /history` returns `{"items": [{"video": <Feed Item>, "progress": <Watch Progress>}], "next_cursor": <string or null>}`. Only videos the caller can watch now are listed; rows for videos made private are kept and come back if the video does. A malformed `cursor` is `400 history_cursor_invalid`.
+
+---
+
 ## 4. Internal Processing Webhook API (`/webhook`)
 
 ### 4.1 Transcoding Complete Callback (`POST /webhook/transcode-complete`)
@@ -344,8 +380,27 @@ Stores metadata, processing states, and storage coordinates for video content.
 
 ---
 
+##### Table 3: `watch_history`
+One row per (user, video): the latest progress the user reached. Written only by the `/history` routes.
+
+| Field Name | Data Type | Nullable | Primary Key | Foreign Key | Index | Constraints / Default | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `user_id` | UUID | No | Yes | `users.id` | Yes | `ON DELETE CASCADE` | Viewer |
+| `video_id` | UUID | No | Yes | `videos.id` | Yes | `ON DELETE CASCADE` | Video watched |
+| `position_seconds` | INTEGER | No | No | No | No | `>= 0` | Last position reached |
+| `duration_seconds` | INTEGER | Yes | No | No | No | Default `NULL` | Duration used for the completion rule |
+| `completed` | BOOLEAN | No | No | No | No | Default `false` | Derived by the server |
+| `first_watched_at` | TIMESTAMPTZ | No | No | No | No | `CURRENT_TIMESTAMP` | First report |
+| `last_watched_at` | TIMESTAMPTZ | No | No | No | Yes | None | Observation time of the stored progress (UTC); orders the history |
+| `updated_at` | TIMESTAMPTZ | No | No | No | No | `CURRENT_TIMESTAMP` | Server write time |
+
+Indexes: primary key `(user_id, video_id)`; `(user_id, last_watched_at DESC, video_id DESC)` for the history list and its cursor; `(video_id)` for the cascade.
+
+---
+
 #### C. Relational Model Summary
 * **`users` to `videos`**: One-to-Many Relationship. One user can upload multiple videos (`1:N`). Deleting a user cascade-deletes all associated video metadata records.
+* **`watch_history`**: Many-to-Many between `users` and `videos`, one row per pair. Deleting either side cascade-deletes its rows.
 
 ---
 

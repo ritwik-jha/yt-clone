@@ -23,9 +23,10 @@ server {
     }
 
     # The API. Matches /auth/..., /video/..., /upload/... (the app's own
-    # /upload page has no trailing path, so it stays with the app) and
-    # /healthz.
-    location ~ ^/((auth|video|upload)/|healthz$) {
+    # /upload page has no trailing path, so it stays with the app),
+    # /history and /history/... (the app's History page is /feed/history),
+    # and /healthz.
+    location ~ ^/((auth|video|upload)/|history(/|$)|healthz$) {
         set $api_origin ${API_ORIGIN};
         proxy_pass $api_origin;
         proxy_http_version 1.1;

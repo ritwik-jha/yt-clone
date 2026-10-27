@@ -32,6 +32,7 @@ List<_NavItem> _primary(SessionState session) => [
       'Your videos',
       Routes.myVideos,
     ),
+    const _NavItem(Icons.history, Icons.history, 'History', Routes.history),
     const _NavItem(
       Icons.file_upload_outlined,
       Icons.file_upload,

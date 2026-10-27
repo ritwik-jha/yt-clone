@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../core/format.dart';
 import '../core/theme.dart';
+import 'watched_bar.dart';
 
-/// A 16:9 thumbnail with the duration badge in the corner.
+/// A 16:9 thumbnail with the duration badge in the corner, and the red
+/// "watched" bar along the bottom when [videoId] is given.
 class VideoThumbnail extends StatelessWidget {
   const VideoThumbnail({
     super.key,
@@ -11,11 +13,15 @@ class VideoThumbnail extends StatelessWidget {
     this.durationSeconds,
     this.radius = 0,
     this.overlay,
+    this.videoId,
   });
 
   final String url;
   final double? durationSeconds;
   final double radius;
+
+  /// Draws how much of this video the signed-in user has watched.
+  final String? videoId;
 
   /// Drawn over the picture, e.g. a processing badge.
   final Widget? overlay;
@@ -46,10 +52,17 @@ class VideoThumbnail extends StatelessWidget {
           else
             const _Placeholder(),
           ?overlay,
+          if (videoId != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: WatchedBar(videoId: videoId!),
+            ),
           if (durationSeconds != null && durationSeconds! > 0)
             Positioned(
               right: 4,
-              bottom: 4,
+              bottom: 4 + (videoId == null ? 0 : YtSizes.watchedBarHeight),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                 decoration: BoxDecoration(

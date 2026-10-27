@@ -15,7 +15,7 @@ It builds on:
 - the backend in `backend/app/`, its SQLite test harness, and the Redis it
   already uses (`app/cache.py`);
 - the Flutter web app in `frontend/` and its ECS deployment, where nginx
-  proxies `^/((auth|video|upload)/|healthz$)` to the API on the same origin.
+  proxies `^/((auth|video|upload)/|history(/|$)|healthz$)` to the API on the same origin.
 
 Today the home feed is newest-first or most-viewed (`GET /video/feed`,
 `sort=latest|popular`), and *Up next* is the same feed or the creator's

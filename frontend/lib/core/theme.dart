@@ -31,6 +31,9 @@ class YtColors {
 
   /// The duration badge on thumbnails.
   static const badge = Color(0xCC000000);
+
+  /// Behind the red "watched" bar on thumbnails.
+  static const watchedTrack = Color(0x99717171);
 }
 
 /// Layout metrics from the mockups.
@@ -43,6 +46,7 @@ class YtSizes {
   static const gridGap = 16.0;
   static const gridMinTileWidth = 250.0;
   static const avatar = 36.0;
+  static const watchedBarHeight = 3.0;
 
   /// Full sidebar at and above this width, the mini rail above [rail].
   static const wide = 1312.0;

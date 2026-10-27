@@ -37,14 +37,17 @@ flutter test                      # unit + widget tests, on the VM
 |---|---|---|
 | `/` | Home: chip bar (All, Most viewed, one per creator) over the video grid | `GET /video/feed?sort=`, `GET /video/channel/{id}` |
 | `/results?search_query=` | Search results, newest or most viewed | `GET /video/search` |
-| `/watch?v=` | Player, title, views/date, share, owner edit/delete, channel row, description, up next (All / From creator) | `GET /video/{id}`, `POST /video/{id}/view`, `PATCH`/`DELETE /video/{id}`, `GET /video/{id}/progress` |
+| `/watch?v=` | Player, title, views/date, share, owner edit/delete, channel row, description, up next (All / From creator); signed in, resumes where you stopped and records progress | `GET /video/{id}`, `POST /video/{id}/view`, `PATCH`/`DELETE /video/{id}`, `GET /video/{id}/progress`, `GET /history/positions`, `POST /history/progress` |
 | `/channel/:id`, `/channel/:id/videos` | Channel: header with HOME/VIDEOS tabs, featured upload, shelves | `GET /video/channel/{id}` |
 | `/my-videos` | Your videos (signed in): every status, live progress, edit, delete | `GET /video/mine`, `GET /video/{id}/progress` |
 | `/upload` | Upload (signed in): drop or pick an MP4, details, thumbnail captured from the video or picked | `GET /upload/video/url{,/thumbnail}`, presigned PUTs, `POST /upload/video/save` |
+| `/feed/history` | Watch history (signed in): newest first by day, remove (with undo), clear all | `GET /history`, `DELETE /history{,/{id}}` |
 | `/signin`, `/signup`, `/verify`, `/forgot-password`, `/reset-password` | Auth | `/auth/*` |
 
-Browsing works signed out. Upload and Your videos send a signed-out visitor
-to Sign in and back afterwards.
+Browsing works signed out. Upload, Your videos, and History send a
+signed-out visitor to Sign in and back afterwards. Signed in, every
+thumbnail carries a red bar for how much of it you watched
+(`GET /history/positions`, one request per screenful).
 
 ## Layout
 
@@ -57,15 +60,20 @@ lib/
 │                             validators, formatters, crash scrubbing
 ├── platform/                 browser APIs behind interfaces: file picking,
 │                             drag-and-drop, frame capture, JPEG encoding,
-│                             presigned PUTs (XHR), fullscreen, leave warning;
+│                             presigned PUTs (XHR), fullscreen, leave warning,
+│                             localStorage, page hide/show, keepalive POST;
 │                             the <video> player with hls.js / dash.js
 ├── models/                   UserProfile, Video/Creator, ChannelListing,
-│                             PageResult, Progress, SavedVideo
-├── services/                 AuthService, VideoService, UploadVideoService
+│                             PageResult, Progress, SavedVideo, WatchProgress
+├── services/                 AuthService, VideoService, UploadVideoService,
+│                             watch history: HistoryService, HistorySync,
+│                             HistoryOutbox, WatchProgressStore,
+│                             ProgressTracker
 ├── cubits/                   session, auth, feed (+search), channel,
-│                             my_videos, video_detail, upload_video
+│                             my_videos, video_detail, upload_video, history
 ├── pages/                    shell (masthead, guide), home, search, watch,
-│                             channel, your_videos, upload, not_found, auth/*
+│                             channel, your_videos, upload, history,
+│                             not_found, auth/*
 └── widgets/                  grid card, list tile, thumbnail, chip bar,
                               player controls, avatar, logo, dialogs, ...
 web/                          index.html, manifest, icons, vendor/ (hls.js,
@@ -91,6 +99,13 @@ integration_test/             browser E2E against the seeded test backend
   button shows its progress, and closing the tab asks first.
 - Avatars are the creator's initial on a colour derived from their id: the
   backend has no profile pictures.
+- Watch history (`../docs/plans/watch-history-plan.md`): the watch page
+  reports the position every 15 s while playing and on pause, seek, end,
+  leaving, and hiding the tab, once 5 s have been played. Reports wait in
+  `localStorage` (`ytp.history.<userId>.<videoId>`) until the server has
+  them, so closing the tab loses nothing; the server keeps the latest
+  observation, so browsers never overwrite newer progress. Signing out sends
+  what is waiting and then deletes it.
 - Not built because the backend has no API for them: likes, comments,
-  subscriptions, history, notifications. The mockup shows these; the app
-  leaves them out rather than show controls that do nothing.
+  subscriptions, notifications. The mockup shows these; the app leaves them
+  out rather than show controls that do nothing.

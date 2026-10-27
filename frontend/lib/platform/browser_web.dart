@@ -241,6 +241,95 @@ class _WebBrowser implements Browser {
       _beforeUnload = null;
     }
   }
+
+  // Storage can throw (SecurityError) when the browser blocks it.
+  web.Storage? get _storage {
+    try {
+      return web.window.localStorage;
+    } on Object {
+      return null;
+    }
+  }
+
+  @override
+  String? readLocal(String key) {
+    try {
+      return _storage?.getItem(key);
+    } on Object {
+      return null;
+    }
+  }
+
+  @override
+  void writeLocal(String key, String value) {
+    try {
+      _storage?.setItem(key, value);
+    } on Object {
+      // Full or blocked: the caller keeps its own copy.
+    }
+  }
+
+  @override
+  void removeLocal(String key) {
+    try {
+      _storage?.removeItem(key);
+    } on Object {
+      // Blocked.
+    }
+  }
+
+  @override
+  List<String> localKeys(String prefix) {
+    final storage = _storage;
+    if (storage == null) return const [];
+    try {
+      return [
+        for (var i = 0; i < storage.length; i++)
+          if (storage.key(i) case final k? when k.startsWith(prefix)) k,
+      ];
+    } on Object {
+      return const [];
+    }
+  }
+
+  @override
+  void Function() listenForVisibility({
+    required void Function() onHidden,
+    required void Function() onVisible,
+  }) {
+    final onChange = ((web.Event _) {
+      if (web.document.visibilityState == 'hidden') {
+        onHidden();
+      } else {
+        onVisible();
+      }
+    }).toJS;
+    final onPageHide = ((web.Event _) => onHidden()).toJS;
+    web.document.addEventListener('visibilitychange', onChange);
+    web.window.addEventListener('pagehide', onPageHide);
+    return () {
+      web.document.removeEventListener('visibilitychange', onChange);
+      web.window.removeEventListener('pagehide', onPageHide);
+    };
+  }
+
+  @override
+  void postOnExit(String url, String json) {
+    try {
+      web.window.fetch(
+        url.toJS,
+        web.RequestInit(
+          method: 'POST',
+          keepalive: true,
+          credentials: 'include',
+          headers: {'Content-Type': 'application/json'}.jsify()! as JSObject,
+          body: json.toJS,
+        ),
+      );
+    } on Object {
+      // Best effort: the outbox sends it again on the next visit.
+    }
+  }
 }
 
 /// Completes on [type]; throws on the element's `error` event or after

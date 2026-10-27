@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -133,6 +134,12 @@ def api_checks(web: httpx.Client) -> None:
            "GET /video/feed?sort=popular")
     expect(web.get("/video/search", params={"q": "zz-no-such-video"}), 200, "GET /video/search")
     expect(web.get("/auth/me"), 401, "GET /auth/me without cookies is 401")
+    # nginx answers an unproxied path with index.html (200), so a JSON 401
+    # proves /history reaches the API.
+    r = expect(web.get("/history"), 401, "GET /history without cookies is 401 (proxied)")
+    check("/history answers JSON missing_access_token",
+          r.headers.get("content-type", "").startswith("application/json")
+          and r.json().get("code") == "missing_access_token", r.text[:100])
 
 
 def browser_checks(url: str, artifacts: Path, video_id: str | None, playable: bool,
@@ -310,6 +317,21 @@ def main() -> int:
         r = expect(web.patch(f"/video/{video_id}", json={"title": title + " (edited)"}),
                    200, "PATCH /video/{id}")
         check("title updated", r.json().get("title") == title + " (edited)")
+
+        section("Watch history")
+        h = expect(web.get("/history"), 200, "GET /history").json()
+        check("a new account has no history", h.get("items") == [], json.dumps(h)[:100])
+        if playable:
+            watched = datetime.now(timezone.utc).isoformat()
+            r = expect(web.post("/history/progress", json={"entries": [
+                {"video_id": video_id, "position_seconds": 1, "watched_at": watched},
+            ]}), 200, "POST /history/progress").json()
+            check("progress saved", r["results"][0]["result"] == "saved", json.dumps(r)[:200])
+            h = expect(web.get("/history"), 200, "GET /history").json()
+            check("history lists the video", [i["video"]["id"] for i in h["items"]] == [video_id])
+            expect(web.delete("/history"), 204, "DELETE /history")
+            h = expect(web.get("/history"), 200, "GET /history").json()
+            check("cleared history is empty", h.get("items") == [])
 
         if args.browser:
             browser_checks(url, artifacts, video_id, playable, args.chromium)
