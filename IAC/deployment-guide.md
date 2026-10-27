@@ -63,7 +63,6 @@ IAC/
 │   ├── storage.tf              # S3 raw/processed + SQS ingest+DLQ + SQS completion+DLQ + S3->SQS notif
 │   ├── redis.tf                # ElastiCache Serverless Redis (locks + progress)
 │   ├── cognito.tf              # User pool + app client + client-secret SSM parameter
-│   ├── cloudfront.tf           # Playback CDN (OAC) for the processed bucket
 │   ├── ecr.tf
 │   ├── iam.tf                  # ECS exec/task roles + Lambda dispatcher role
 │   ├── ecs.tf                  # Cluster + task definition
@@ -136,13 +135,15 @@ All defaults live in `terraform/variables.tf`; override any of these in
   `terraform_remote_state` and does not modify anything here, except for
   one ingress rule it adds to `aws_security_group.redis` so the API tasks
   can reach the cache. Walkthrough: `../backend/deployment-guide.md`.
-- **Custom domains** for the API or the CloudFront distribution. Both use
+- **Custom domains** for the API or the CloudFront distributions. They use
   AWS-issued hostnames.
+- **The playback CDN.** The edge CloudFront distribution in
+  `../frontend/terraform/cloudfront.tf` serves DASH and HLS output from the
+  private processed bucket through Origin Access Control, only to holders of
+  the signed cookies the API sets, and owns the bucket's policy.
 
-This stack **does** provision the CloudFront distribution (`cloudfront.tf`)
-that serves DASH and HLS output from the private processed bucket through Origin
-Access Control, and the SSM SecureString holding the Cognito client secret
-that the backend API task reads at start.
+This stack **does** provision the SSM SecureString holding the Cognito
+client secret that the backend API task reads at start.
 
 The Cognito user pool + app client (`cognito.tf`) **is** provisioned here —
 the pool uses email as the username (`username_attributes = ["email"]`),
@@ -179,8 +180,8 @@ backend's PostgreSQL `videos` table:
   `processing` only replaces `PENDING`; `failed` never replaces
   `COMPLETED`; `completed` stores `dash_manifest_s3_key` and
   `hls_manifest_s3_key` (the keys parsed from the two URIs) and
-  `duration_seconds`. The API builds
-  `https://<cloudfront_domain_name>/<key>` for each when it reads the row:
+  `duration_seconds`. The API builds `/media/<key>` for each when it reads
+  the row (served by the edge distribution with signed cookies):
   `manifest_url` for DASH players, `hls_url` for AVPlayer / Safari.
 - **Idempotency**: the guards make redelivered and out-of-order messages
   no-ops, so the poller never moves a status backwards.
@@ -224,7 +225,7 @@ terraform apply
 ```
 
 Outputs to note: `ecr_repository_url`, `raw_bucket`, `completion_queue_url`,
-`completion_queue_arn`, `redis_endpoint`, `cloudfront_domain_name`.
+`completion_queue_arn`, `redis_endpoint`, `processed_bucket_regional_domain_name`.
 
 > The Lambda ships with a placeholder ECR image reference on the first
 > apply. `ecs:RunTask` will fail until Step 3 pushes the image. Expected.

@@ -52,18 +52,40 @@ def test_seed_feed_is_public_completed_newest_first():
 
 
 def test_cache_round_trip_with_fake_redis(monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.config import get_settings
+    from app.models import User, Video, VideoStatus, Visibility
     from tests.support.fakes import fake_redis
-    from app.schemas import CreatorDetail, VideoDetail
 
     r = fake_redis()
     monkeypatch.setattr(cache, "redis_client", lambda: r)
-    video = VideoDetail(
-        id=seed_data.VIDEOS[0].id, title="t", thumbnail_url="https://x/t",
-        views_count=3, created_at="2026-01-01T00:00:00Z", visibility="PUBLIC",
-        status="COMPLETED",
-        creator=CreatorDetail(id=seed_data.ALICE.id, name="A", created_at="2026-01-01T00:00:00Z"),
+    monkeypatch.setattr(get_settings(), "thumbnails_cdn_domain", "thumbs.test")
+    monkeypatch.setattr(get_settings(), "media_base_url", "/media")
+    at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    video = Video(
+        id=seed_data.VIDEOS[0].id, title="t", thumbnail_s3_key="thumbnails/t",
+        dash_manifest_s3_key="v/dash/manifest.mpd", hls_manifest_s3_key="v/dash/master.m3u8",
+        views_count=3, created_at=at, visibility=Visibility.PUBLIC, status=VideoStatus.COMPLETED,
+        user=User(id=seed_data.ALICE.id, name="A", created_at=at),
     )
     cache.put_video(video)
-    assert cache.get_video(video.id) == video
+    cached = cache.get_video(video.id)
+    assert (cached.thumbnail_url, cached.manifest_url, cached.hls_url) == (
+        "https://thumbs.test/thumbnails/t", "/media/v/dash/manifest.mpd", "/media/v/dash/master.m3u8",
+    )
+    # URLs are built on read: a new media base applies to cached entries.
+    monkeypatch.setattr(get_settings(), "media_base_url", "https://cdn.example/m")
+    assert cache.get_video(video.id).hls_url == "https://cdn.example/m/v/dash/master.m3u8"
     cache.drop_video(video.id)
     assert cache.get_video(video.id) is None
+
+
+def test_cache_entries_in_the_old_url_form_miss(monkeypatch):
+    from tests.support.fakes import fake_redis
+
+    r = fake_redis()
+    monkeypatch.setattr(cache, "redis_client", lambda: r)
+    video_id = seed_data.VIDEOS[0].id
+    r.hset(cache._key(video_id), mapping={"id": str(video_id), "manifest_url": "https://old/x"})
+    assert cache.get_video(video_id) is None

@@ -139,15 +139,26 @@ in this setup, which is why same-origin is the default advice.
 **On ECS (same origin, ready-made).** `deploy/Dockerfile` packages the build
 in nginx, and `deploy/nginx.conf.template` forwards `/auth/`, `/video/`,
 `/upload/`, and `/healthz` to the API. `terraform/` runs that image as an ECS
-Express Mode service (HTTPS `*.on.aws` URL) in the backend's cluster. Build
-with `--no-web-resources-cdn` so CanvasKit is served from the container.
-`../DEPLOY_AWS.md` walks through it end to end.
+Express Mode service in the backend's cluster, behind an edge CloudFront
+distribution (`terraform/cloudfront.tf`) whose `*.cloudfront.net` URL is the
+app's. Build with `--no-web-resources-cdn` so CanvasKit is served from the
+container. `../DEPLOY_AWS.md` walks through it end to end.
 
-Either way the media CORS is already in place: the raw upload bucket accepts
-browser PUTs from any origin (`IAC/terraform/storage.tf`), the thumbnails
-bucket from `thumbnails_cors_origins`, and both CloudFront distributions add
-`Access-Control-Allow-Origin` (hls.js fetches playlists and segments with
-XHR).
+**Streams.** The API answers `hls_url` / `manifest_url` as `/media/<key>`,
+relative to its own origin (`VideoService.streamUrl` resolves them against
+`API_BASE_URL`, or the page's origin). On ECS the edge distribution serves
+`/media/*` from the processed bucket, and only with the CloudFront signed
+cookies that `POST /video/{id}/playback` sets. The watch page asks for them
+before it opens the stream and again before they expire
+(`lib/services/playback_access.dart`). Same origin, they are first-party
+cookies: no CORS. With the API on another origin the players send them
+anyway (`withCredentials`), but that origin must then answer `/media/` with
+CORS for the app's origin and credentials, which the edge distribution
+doesn't: watch videos on the same-origin deployment.
+
+The upload CORS is already in place: the raw upload bucket accepts browser
+PUTs from any origin (`IAC/terraform/storage.tf`), and the thumbnails bucket
+and its CloudFront distribution from `thumbnails_cors_origins`.
 
 ## Troubleshooting
 
@@ -156,7 +167,7 @@ XHR).
 | Signed in, but every call is anonymous / back at Sign in | The browser isn't sending the cookies: app and API on different sites with `SameSite=Lax`, or `COOKIE_SECURE=true` over plain http. See §3 and §5 |
 | `blocked by CORS policy` in the console | Add the app's exact origin (scheme, host, port) to the API's `CORS_ORIGINS` |
 | A reload shows the host's 404 page | The host doesn't fall back to `index.html` (§5) |
-| "This video can't be played right now" | The stream failed to load: check the CloudFront URL and its CORS headers in the network tab. Videos still transcoding never reach the player |
+| "This video can't be played right now" | The stream failed to load. In the network tab: `POST /video/{id}/playback` must answer 200 with three `Set-Cookie: CloudFront-...` headers, and the `/media/...` requests must carry them. A 403 on `/media/` means no or stale cookies (the page renews and retries once), or the app is opened on the ALB's `*.on.aws` URL instead of the edge distribution's. Videos still transcoding never reach the player |
 | Upload fails with 403 | The presigned URL expired (the app fetches a new one once) or a proxy changed the `Content-Type`; it must be exactly `video/mp4` / `image/jpeg` |
 | Upload picker greys out the file | Only MP4 is accepted (the pipeline's raw bucket only fires on `.mp4` keys) |
 | E2E: `Chrome N needs chromedriver N` | Install the ChromeDriver whose major version matches `chrome --version` |

@@ -318,6 +318,7 @@ class _Row extends StatelessWidget {
                     child: VideoThumbnail(
                       url: video.thumbnailUrl,
                       durationSeconds: video.durationSeconds,
+                      videoId: video.id,
                     ),
                   ),
                   const SizedBox(width: 16),

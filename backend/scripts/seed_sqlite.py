@@ -18,7 +18,8 @@ sys.path.insert(0, str(ROOT))
 from sqlalchemy import create_engine, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
-from app.models import Base, User, Video  # noqa: E402
+from app.models import Base, User, Video, WatchHistory  # noqa: E402
+from app.watch_progress import is_completed  # noqa: E402
 from tests.support import seed_data as seed  # noqa: E402
 
 
@@ -49,10 +50,24 @@ def seed_database(path: Path) -> dict[str, int]:
                 created_at=v.created_at,
                 updated_at=v.created_at,
             ))
+        db.flush()
+        for h in seed.HISTORY:
+            video = seed.VIDEOS_BY_KEY[h.video]
+            db.add(WatchHistory(
+                user_id=seed.USERS_BY_KEY[h.user].id,
+                video_id=video.id,
+                position_seconds=h.position,
+                duration_seconds=video.duration,
+                completed=is_completed(h.position, video.duration),
+                first_watched_at=h.last_watched_at,
+                last_watched_at=h.last_watched_at,
+                updated_at=h.last_watched_at,
+            ))
         db.commit()
         counts = {
             "users": db.scalar(select(func.count()).select_from(User)),
             "videos": db.scalar(select(func.count()).select_from(Video)),
+            "history": db.scalar(select(func.count()).select_from(WatchHistory)),
         }
     engine.dispose()
     return counts
@@ -63,7 +78,8 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=ROOT / "test.db")
     args = parser.parse_args()
     counts = seed_database(args.db.resolve())
-    print(f"seeded {args.db}: {counts['users']} users, {counts['videos']} videos")
+    print(f"seeded {args.db}: {counts['users']} users, {counts['videos']} videos, "
+          f"{counts['history']} history rows")
 
 
 if __name__ == "__main__":

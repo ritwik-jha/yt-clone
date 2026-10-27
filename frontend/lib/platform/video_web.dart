@@ -56,6 +56,8 @@ class _WebPlayerController extends PlayerController {
   final _listeners = <(String, JSFunction)>[];
   JSObject? _hls;
   JSObject? _dash;
+  // A resume seek waiting for this source's metadata.
+  JSFunction? _pendingSeek;
   bool _recoveredMedia = false;
   bool _disposed = false;
 
@@ -109,6 +111,7 @@ class _WebPlayerController extends PlayerController {
   }
 
   void _teardown() {
+    _cancelPendingSeek();
     _hls?.callMethod<JSAny?>('destroy'.toJS);
     _hls = null;
     _dash?.callMethod<JSAny?>('reset'.toJS);
@@ -119,14 +122,22 @@ class _WebPlayerController extends PlayerController {
   }
 
   @override
-  Future<void> open(PlaybackSource source, {bool autoplay = true}) async {
+  Future<void> open(
+    PlaybackSource source, {
+    bool autoplay = true,
+    Duration? startAt,
+  }) async {
     _teardown();
     value = PlayerValue(volume: value.volume, muted: value.muted);
+    final start = startAt == null || startAt <= Duration.zero
+        ? null
+        : startAt.inMilliseconds / 1000;
     try {
       switch (source.kind) {
         case StreamKind.hls:
-          await _openHls(source.url);
+          await _openHls(source.url, start);
         case StreamKind.dash:
+          if (start != null) _seekOnMetadata(start);
           await _openDash(source.url);
       }
     } on Object catch (e) {
@@ -136,8 +147,28 @@ class _WebPlayerController extends PlayerController {
     if (autoplay && !_disposed) await play();
   }
 
-  Future<void> _openHls(String url) async {
+  /// Seeks to [seconds] once the element knows the duration: native HLS
+  /// (Safari) and dash.js take no start position of their own.
+  void _seekOnMetadata(double seconds) {
+    final once = ((web.Event _) {
+      _cancelPendingSeek();
+      final d = _el.duration;
+      _el.currentTime = d.isFinite ? seconds.clamp(0, d) : seconds;
+    }).toJS;
+    _pendingSeek = once;
+    _el.addEventListener('loadedmetadata', once);
+  }
+
+  void _cancelPendingSeek() {
+    if (_pendingSeek case final fn?) {
+      _el.removeEventListener('loadedmetadata', fn);
+    }
+    _pendingSeek = null;
+  }
+
+  Future<void> _openHls(String url, double? start) async {
     if (_el.canPlayType('application/vnd.apple.mpegurl').isNotEmpty) {
+      if (start != null) _seekOnMetadata(start);
       _el.src = url;
       return;
     }
@@ -146,7 +177,16 @@ class _WebPlayerController extends PlayerController {
     if (!(ctor as JSObject).callMethod<JSBoolean>('isSupported'.toJS).toDart) {
       throw const _PlayerError('this browser has no Media Source support');
     }
-    final hls = ctor.callAsConstructor<JSObject>();
+    final config = JSObject();
+    // startPosition: the first segment fetched is the one to resume in.
+    if (start != null) config['startPosition'] = start.toJS;
+    // The CDN wants the signed playback cookies on every request. The app
+    // and media share an origin in production, where this changes nothing;
+    // it matters when the API (and so the media) is on another origin.
+    config['xhrSetup'] = ((JSObject xhr, JSString _) {
+      xhr['withCredentials'] = true.toJS;
+    }).toJS;
+    final hls = ctor.callAsConstructor<JSObject>(config);
     hls.callMethod<JSAny?>(
       'on'.toJS,
       'hlsError'.toJS,
@@ -176,6 +216,12 @@ class _WebPlayerController extends PlayerController {
       'on'.toJS,
       'error'.toJS,
       ((JSAny? _) => _fail('DASH stream error')).toJS,
+    );
+    // Cookies on every request, as for hls.js above (null: all types).
+    player.callMethod<JSAny?>(
+      'setXHRWithCredentialsForType'.toJS,
+      null,
+      true.toJS,
     );
     player.callMethod<JSAny?>('initialize'.toJS, _el, url.toJS, false.toJS);
     _dash = player;

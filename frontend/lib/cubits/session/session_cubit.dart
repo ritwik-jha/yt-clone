@@ -19,10 +19,16 @@ class SessionCubit extends Cubit<SessionState> {
   SessionCubit({
     required this._auth,
     this.refreshEvery = const Duration(minutes: 50),
+    this.beforeLogout,
   }) : super(const SessionUnknown());
 
   final AuthService _auth;
   final Duration refreshEvery;
+
+  /// Runs before an explicit sign-out, while the cookies still work (watch
+  /// history sends what is waiting, then forgets it). Its errors don't stop
+  /// the sign-out.
+  final Future<void> Function()? beforeLogout;
   Timer? _timer;
 
   UserProfile? get user => switch (state) {
@@ -64,6 +70,11 @@ class SessionCubit extends Cubit<SessionState> {
 
   Future<void> logout() async {
     _timer?.cancel();
+    try {
+      await beforeLogout?.call();
+    } on Object {
+      // Never keep someone signed in because a flush failed.
+    }
     await _auth.logout();
     _signedOut(const SessionUnauthenticated());
   }

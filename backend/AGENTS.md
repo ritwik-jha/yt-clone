@@ -16,7 +16,7 @@ managed by Alembic). The API contract and schema come from
 Lives at the repo root, a sibling of `../IAC/` (Terraform + dispatcher
 Lambda + Fargate transcoder). It owns the infrastructure it runs *on*
 (`terraform/` here: ECS cluster and services, RDS PostgreSQL, IAM, SGs, ECR,
-thumbnails bucket + CloudFront, log group)
+thumbnails bucket + CloudFront, the playback-cookie key group, log group)
 and nothing in the pipeline — those coordinates arrive via
 `terraform_remote_state`. Deployed on its own cadence: the pipeline stack is
 applied first, then this one.
@@ -30,18 +30,22 @@ backend/
 │   ├── config.py               pydantic-settings; env first, then .env
 │   ├── clients.py              lazy singletons: cognito, s3, sqs, redis
 │   ├── db.py                   engine + sessions; password from DB_PASSWORD or the RDS secret
-│   ├── models.py               users + videos + transcode_results ORM models, enums
+│   ├── models.py               users + videos + transcode_results + watch_history ORM models, enums
 │   ├── users.py                upsert_user, shared by signup and get_current_user
 │   ├── cache.py                video:meta:<id> Redis hash cache for GET /video/{id}
+│   ├── media_signing.py        CloudFront signed cookies for a video's media folder (POST /video/{id}/playback)
 │   ├── crypto.py               HMAC-SHA256 secret_hash for Cognito app clients
 │   ├── deps.py                 get_identity / get_optional_identity / get_current_user
 │   ├── errors.py               APIError: HTTPException carrying a stable `code`
 │   ├── schemas.py              pydantic request/response models
+│   ├── video_views.py          FeedItem from a row, URL builders, viewable_by (shared by routers)
+│   ├── watch_progress.py       history rules + SQL builders (completion, cursor, upsert); no clients
 │   ├── routers/
 │   │   ├── auth.py             /auth/{signup,verify-otp,resend-otp,forgot-password,
 │   │   │                         reset-password,login,refresh,logout,me}
 │   │   ├── upload.py           /upload/video/{url, url/thumbnail, save}
-│   │   └── video.py            /video/{feed, mine, {id}, {id}/progress, {id}/view}
+│   │   ├── video.py            /video/{feed, mine, {id}, {id}/progress, {id}/view, {id}/playback}
+│   │   └── history.py          /history, /history/{progress, positions, {video_id}}
 │   └── workers/
 │       └── completion_poller.py  SQS -> PostgreSQL drainer (its own container)
 ├── migrations/                 Alembic env.py + versions/ (schema source of truth)
@@ -83,6 +87,12 @@ backend/
 | DELETE | `/video/{video_id}` | cookie, owner | Delete the row (204), drop the `video:meta` key, then remove the S3 objects in the background |
 | GET  | `/video/{video_id}/progress` | optional | Redis `GET video:progress:<stem of s3_key>` + row status |
 | POST | `/video/{video_id}/view` | optional | Atomic `views_count + 1` (204); 409 `video_not_ready` unless COMPLETED |
+| POST | `/video/{video_id}/playback` | optional | Who may read it may stream it: sets `CloudFront-Policy` / `-Signature` / `-Key-Pair-Id` for the folder of its manifests (`Path=/media/<folder>/`, `MEDIA_COOKIE_TTL_SECONDS`), returns `expires_at` (null with no key), `Cache-Control: no-store`; 404 unless viewable, 409 `video_not_ready` unless COMPLETED |
+| POST | `/history/progress` | cookie | Record a batch of 1–50 progress reports; the latest observation (`watched_at`) wins; per-entry `saved` / `stale` / `not_found` / `expired` |
+| GET  | `/history` | cookie | Caller's history, most recently watched first, keyset `cursor`; only videos the caller can watch now |
+| GET  | `/history/positions` | cookie | Caller's progress on up to 50 `video_ids` |
+| DELETE | `/history/{video_id}` | cookie | Remove one entry (204, idempotent) |
+| DELETE | `/history` | cookie | Clear the caller's history (204) |
 | GET  | `/healthz` | – | Liveness |
 
 "Optional" auth: a COMPLETED video that is PUBLIC or UNLISTED is readable by
@@ -112,7 +122,8 @@ All config is env-driven via `pydantic_settings.BaseSettings`.
 
 Settings default to empty, and each entrypoint calls `Settings.require(...)`
 for the ones it needs: `main.py` for Cognito, the raw / thumbnails /
-processed buckets, Redis, `CLOUDFRONT_DOMAIN`, and `THUMBNAILS_CDN_DOMAIN`;
+processed buckets, Redis, and `THUMBNAILS_CDN_DOMAIN` (and it warns when
+`MEDIA_KEY_PAIR_ID` / `MEDIA_PRIVATE_KEY` are unset: no signed cookies);
 the poller for
 `COMPLETION_QUEUE_URL`. Both call `Settings.require_database()` (host, name,
 user, and `DB_PASSWORD` or `DB_SECRET_ARN`). A missing value fails at
@@ -150,14 +161,29 @@ only. The local `.env` is gitignored, written mode 600, and excluded by
   The owner may edit title, description, and visibility (`PATCH`) and delete
   the row (`DELETE`); `POST /video/{id}/view` increments `views_count`
   without touching `updated_at`.
+- **PostgreSQL `watch_history`** — owned by the `/history` routes. One row
+  per (user, video). The upsert keeps the report with the latest
+  `watched_at`, clamped to the server clock, so a late flush never overwrites
+  newer progress from another browser; the server derives `completed`.
+  Reads hide rows for videos the caller can no longer watch (kept, not
+  deleted); `ON DELETE CASCADE` from `users` and `videos` removes them. Every
+  query must run on SQLite too (the tests): build dialect-specific SQL with
+  `db.get_bind().dialect.name`, take `now` in Python, store UTC. Per-user
+  progress never goes in `video:meta` or `GET /video/{id}`.
 - **PostgreSQL `transcode_results`** — owned by the poller. Terminal results
   whose `videos` row did not exist yet, keyed by `raw_key`. See "Poller
   worker". Nothing in the API reads or writes it.
 - **URLs are derived, not stored.** Responses build `manifest_url` (DASH)
-  and `hls_url` from `CLOUDFRONT_DOMAIN` + `dash_manifest_s3_key` /
-  `hls_manifest_s3_key`, and `thumbnail_url` from `THUMBNAILS_CDN_DOMAIN` +
-  `thumbnail_s3_key`, at read time. `hls_url` is null for videos transcoded
-  before HLS output existed.
+  and `hls_url` from `MEDIA_BASE_URL` (`/media`, relative to the API's
+  origin) + `dash_manifest_s3_key` / `hls_manifest_s3_key`, and
+  `thumbnail_url` from `THUMBNAILS_CDN_DOMAIN` + `thumbnail_s3_key`, at read
+  time (`app/video_views.py`; the `video:meta` cache stores the keys too).
+  `hls_url` is null for videos transcoded before HLS output existed.
+- **Streams are private.** The edge distribution serves `/media/*` only
+  with CloudFront signed cookies; `POST /video/{id}/playback` is the one
+  place that issues them, after the same visibility check as
+  `GET /video/{id}` (`app/media_signing.py`). Don't hand out media URLs that
+  bypass it.
 - **Redis `video:progress:<stem>`** — read-only for the backend.
   Transcoder is the sole writer. Never mint progress values in the
   backend.
@@ -211,8 +237,9 @@ only. The local `.env` is gitignored, written mode 600, and excluded by
   each parked result whose row now exists goes through the same guarded
   UPDATE and is deleted; parked results older than `PARKED_RESULT_TTL`
   (7 days) are pruned. A failure here is logged and the loop carries on.
-- Clients play `manifest_url` (DASH) or `hls_url`; the processed bucket is
-  private and CloudFront reads it through OAC.
+- Clients play `manifest_url` (DASH) or `hls_url` after
+  `POST /video/{id}/playback`; the processed bucket is private and the edge
+  distribution reads it through OAC.
 - On success → `delete_message`.
 - On any exception (bad JSON, unknown status, database error) → **do NOT**
   delete; SQS redelivers after visibility timeout, DLQ catches poison

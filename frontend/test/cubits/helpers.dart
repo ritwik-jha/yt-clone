@@ -1,6 +1,7 @@
 import 'package:mocktail/mocktail.dart';
 import 'package:ytp_app/models/video.dart';
 import 'package:ytp_app/services/auth_service.dart';
+import 'package:ytp_app/services/history_service.dart';
 import 'package:ytp_app/services/upload_video_service.dart';
 import 'package:ytp_app/services/video_service.dart';
 
@@ -9,6 +10,8 @@ class MockAuthService extends Mock implements AuthService {}
 class MockVideoService extends Mock implements VideoService {}
 
 class MockUploadService extends Mock implements UploadVideoService {}
+
+class MockHistoryService extends Mock implements HistoryService {}
 
 Video makeVideo(
   String id, {

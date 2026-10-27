@@ -28,12 +28,13 @@ them (`frontend/AGENTS.md`).
 | Doc | Covers |
 |---|---|
 | [`video-streaming-scaling-and-bottlenecks.md`](architecture/video-streaming-scaling-and-bottlenecks.md) | Where the pipeline breaks under load, and designs to scale it. Mostly not built. |
+| [`private-media-delivery.md`](architecture/private-media-delivery.md) | Why streams are served behind CloudFront signed cookies on one edge distribution, how it works, and what it does and doesn't protect. Built. |
 
-## `plans/` — features not built yet
+## `plans/` — feature plans
 
 | Doc | Covers | Depends on |
 |---|---|---|
-| [`watch-history-plan.md`](plans/watch-history-plan.md) | Watch history, resume across browsers, the History page, progress bars on thumbnails. | — |
+| [`watch-history-plan.md`](plans/watch-history-plan.md) | Watch history, resume across browsers, the History page, progress bars on thumbnails. Built; §12 lists where the code differs. | — |
 | [`recommendations-plan.md`](plans/recommendations-plan.md) | Tags, likes, subscriptions, *Not interested*; a personalised home feed and related videos for *Up next*; impressions and A/B measurement. | Watch history |
 
 Deployment runbooks live outside `docs/`: `DEPLOY_AWS.md` at the root, and

@@ -17,6 +17,10 @@ It builds on what is on `main` today:
 An earlier version of this plan targeted the Android/iOS app (BetterPlayer,
 files in app storage, Bearer tokens). §11 lists what changed and why.
 
+**Status:** built (M1–M5 and the M6 fallback). §12 lists where the code
+differs from this plan and why. The manual two-browser check (§8.4) needs a
+deployed stack.
+
 ---
 
 ## Contents
@@ -32,6 +36,7 @@ files in app storage, Bearer tokens). §11 lists what changed and why.
 9. Rollout and milestones
 10. Risks and open questions
 11. Changes from the mobile version of this plan
+12. Where the code differs from this plan
 
 ---
 
@@ -94,7 +99,7 @@ files in app storage, Bearer tokens). §11 lists what changed and why.
 | `user_id` | `uuid` | no | FK → `users.id` `ON DELETE CASCADE` |
 | `video_id` | `uuid` | no | FK → `videos.id` `ON DELETE CASCADE` |
 | `position_seconds` | `integer` | no | Last position reached, ≥ 0. Clamped to the duration. |
-| `duration_seconds` | `integer` | yes | Duration the browser's `<video>` reported. Used when `videos.duration_seconds` is null. |
+| `duration_seconds` | `integer` | yes | Duration the completion rule used: `videos.duration_seconds`, or what the browser's `<video>` reported when that is null. Stored so `GET /history/positions` can answer without joining `videos`. |
 | `completed` | `boolean` | no | Default `false`. Derived by the server (H4). |
 | `first_watched_at` | `timestamptz` | no | Default `now()`. Set on insert only. |
 | `last_watched_at` | `timestamptz` | no | Observation time of the stored progress (H2, H3), UTC. Drives ordering and conflict resolution. |
@@ -393,8 +398,9 @@ with `Content-Type` for the origins in `CORS_ORIGINS`.
 | `app/models.py` | `WatchHistory` model (§3.2). |
 | `migrations/versions/0003_watch_history.py` | New table and indexes (§3.3). |
 | `app/schemas.py` | `ProgressEntryIn`, `RecordProgressRequest`, `WatchProgress`, `ProgressResult` (`result: Literal["saved", "stale", "not_found", "expired"]`), `RecordProgressResponse`, `HistoryItem` (`video: FeedItem`), `HistoryResponse`, `PositionsResponse`. `watched_at` validator rejects naive datetimes and converts to UTC. |
-| `app/video_views.py` (new) | `_feed_fields`, `_to_feed_item`, `_thumbnail_url`, `_manifest_url`, and `viewable_by(user_id)`, a SQL expression (`status = COMPLETED AND (visibility != PRIVATE OR user_id = :me)`), moved out of `routers/video.py`. |
-| `app/routers/history.py` (new) | The five routes (§5), the dialect-aware upsert (§4), the cursor encode/decode, and `_utc()` (attach UTC to naive values read back from SQLite). |
+| `app/video_views.py` (new) | `feed_fields`, `to_feed_item`, `thumbnail_url`, `manifest_url`, and `viewable_by(user_id)`, a SQL expression (`status = COMPLETED AND (visibility != PRIVATE OR user_id = :me)`), moved out of `routers/video.py`. |
+| `app/watch_progress.py` (new) | The completion rule, the dialect-aware upsert (§4), the cursor encode/decode, de-duplication of a batch, and `utc()` (attach UTC to naive values read back from SQLite). No database session or AWS client, so the seed script and the tests import it without binding the real Cognito client before `tests/support/server.py` swaps in the fake. |
+| `app/routers/history.py` (new) | The five routes (§5). |
 | `app/routers/video.py` | Import the moved helpers. No behaviour change. |
 | `app/main.py` | `app.include_router(history.router)`. |
 | `scripts/seed_sqlite.py`, `tests/support/seed_data.py` | Seeded history rows (§8.1), written after the videos. |
@@ -433,7 +439,8 @@ lib/
 │   ├── history_service.dart         NEW  record(), list(cursor), positions(ids), remove(id), clear(), exitUrl
 │   ├── history_outbox.dart          NEW  per-user pending reports in localStorage (H11)
 │   ├── watch_progress_store.dart    NEW  videoId → WatchProgress for the bars; coalesces lookups
-│   └── progress_tracker.dart        NEW  PlayerController values → reports (heartbeat, pause, seek, end, exit)
+│   ├── progress_tracker.dart        NEW  PlayerController values → reports (heartbeat, pause, seek, end, exit)
+│   └── history_sync.dart            NEW  ties session, outbox, store, and the active tracker together
 ├── cubits/
 │   ├── history/history_cubit.dart   NEW  cursor paging, day groups, remove/undo, clear
 │   ├── history/history_state.dart   NEW
@@ -859,3 +866,18 @@ route). M3–M5 can each be a separate PR. Deploy with the runbook
 | Deployment | Not covered | nginx proxies `/history`; smoke test checks it | Same-origin deploy: an unproxied path returns `index.html` |
 | Signed-out visitors | Not a case (the app required sign-in) | No recording, no bars, History redirects to Sign in | The web app lets anyone browse |
 | Older backends | Fallback for the in-app server URL in dev builds | Fallback only for a frontend deployed ahead of its backend | The web app has no in-app server URL |
+
+---
+
+## 12. Where the code differs from this plan
+
+| Topic | Plan | Built | Why |
+|---|---|---|---|
+| Undo on History (§7.7) | Re-send the entry's last progress with its original `watched_at` | The row is hidden at once and `DELETE /history/{id}` is sent after 5 s (or when the page closes); *Undo* only puts the row back | A re-sent entry watched more than 30 days ago is answered `expired`, so undo would silently fail for older history (the seeded rows are such entries) |
+| `watch_history.duration_seconds` (§3.1) | What the browser reported | The duration the completion rule used: the video's, else the browser's | `GET /history/positions` then answers without joining `videos`, and the bars get the right fraction |
+| Backend helpers (§6) | In `routers/history.py` | Rules and SQL builders in `app/watch_progress.py`; the router keeps the routes | Importing a router binds the real Cognito client, which broke the test server's fakes when the seed script imported it |
+| Wiring (§7.8) | In `app.dart` | `HistorySync` (`lib/services/history_sync.dart`) owns the outbox, the store, the active tracker, the visibility subscription, and the sign-out flush; `app.dart` feeds it session changes | One object to test for the cross-cutting rules (sign-out, hide, no-history fallback) |
+| Store updates (§7.6) | Set the bar's value directly | Reads see changes at once; the bars' listenables update in a microtask | The watch page reports as it is disposed, inside a frame, when the widget tree is locked |
+| Bars before sign-in (§7.6) | — | A bar built while the session is still being restored asks for its video when the store becomes active | Otherwise a page load signed in showed no bars until something rebuilt |
+| Concurrent flushes (§7.4) | Share one run | A flush asked for during a run makes it go round once more | Reports written after a run started (sign-out right after sign-in) were otherwise left unsent |
+

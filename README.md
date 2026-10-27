@@ -20,7 +20,7 @@ The client is a Flutter web app (dark, YouTube-style, from the Figma
 │   ├── app/                       routers, schemas, models, config, boto3/redis clients
 │   ├── migrations/                Alembic schema migrations (users, videos, transcode_results)
 │   ├── terraform/                 ECS Express API + poller service, RDS PostgreSQL, IAM, SGs,
-│   │                              ECR, thumbnails bucket + CloudFront
+│   │                              ECR, thumbnails bucket + CloudFront, playback-cookie key group
 │   ├── scripts/                   generate-env (local) / push-image
 │   ├── Dockerfile, docker-compose.yml
 │   ├── deployment-guide.md        Deploy walkthrough (run after the pipeline)
@@ -28,8 +28,7 @@ The client is a Flutter web app (dark, YouTube-style, from the Figma
 │
 ├── IAC/                           The transcoding pipeline
 │   ├── terraform/                 VPC, S3 x2, SQS x2 + DLQs, ECR, ECS, IAM,
-│   │                              Lambda, ElastiCache Redis, Cognito,
-│   │                              CloudFront (processed bucket)
+│   │                              Lambda, ElastiCache Redis, Cognito
 │   ├── lambda/                    SQS -> ecs:RunTask dispatcher
 │   ├── transcoder/                Fargate container (ffmpeg -> DASH + HLS)
 │   ├── deployment-guide.md        Step-by-step deploy walkthrough
@@ -37,15 +36,16 @@ The client is a Flutter web app (dark, YouTube-style, from the Figma
 │
 ├── frontend/                      Flutter web app: lib/, web/, test/, integration_test/
 │   ├── deploy/                    nginx image: serves the app, proxies the API (same origin)
-│   └── terraform/                 the app as an ECS Express Mode service
+│   └── terraform/                 the app as an ECS Express Mode service, behind the edge
+│                                  CloudFront (app + API + /media/ with signed cookies)
 │
 ├── DEPLOY_AWS.md                  End-to-end AWS deploy + live integration test (runbook)
 │
 └── docs/                          Design docs (see "Design docs" below, and docs/README.md)
     ├── specs/                     API + DB schema, screens, ECS task definition
     ├── guides/                    Early implementation guides (design rationale)
-    ├── architecture/              Scaling analysis
-    └── plans/                     Feature plans: watch history, recommendations
+    ├── architecture/              Scaling analysis; private media delivery (signed cookies)
+    └── plans/                     Feature plans: watch history (built), recommendations
 ```
 
 `backend/` is deliberately a sibling of `IAC/`, not a child: it is
@@ -93,7 +93,8 @@ Client --presigned PUT--> S3 raw bucket
 Client --GET /video/{id}/progress--------------------> FastAPI backend --GET video:progress:<id> --> Redis
                                                                     +-> SELECT --> PostgreSQL
 
-Client --GET manifest_url (DASH) | hls_url (HLS)--> CloudFront --OAC--> S3 processed bucket
+Client --POST /video/{id}/playback--> FastAPI backend: CloudFront signed cookies for that video's folder
+Client --GET /media/... (manifest_url | hls_url) + cookies--> edge CloudFront --OAC--> S3 processed bucket
 ```
 
 Transcode output is a ladder at 1080p / 720p / 480p (scaled to fit, so
@@ -137,7 +138,8 @@ fMP4 segments, described by both a DASH manifest and an HLS master playlist.
 | ElastiCache Serverless Redis | `IAC/terraform/redis.tf` |
 | ECR repo, ECS cluster + task definition, CW log group | `IAC/terraform/{ecr,ecs}.tf` |
 | Lambda dispatcher + event source mapping | `IAC/terraform/lambda.tf` |
-| CloudFront distribution + OAC for the processed bucket | `IAC/terraform/cloudfront.tf` |
+| Edge CloudFront distribution (the app's URL: app, API, and `/media/*` from the processed bucket via OAC, signed cookies only) + the processed bucket's policy | `frontend/terraform/cloudfront.tf` |
+| CloudFront key group for the playback cookies (key pair made once into SSM, `DEPLOY_AWS.md` §4.1) | `backend/terraform/media_signing.tf` |
 | Backend ECS cluster, Express Mode API service (creates its HTTPS ALB), poller service | `backend/terraform/ecs.tf` |
 | Per-service execution/task roles, Express infrastructure role, SGs | `backend/terraform/{iam,network}.tf` |
 | ECR repo for the backend image, log group | `backend/terraform/{ecr,logs}.tf` |
@@ -219,8 +221,10 @@ transcoder image, x86_64 backend image.
 
 - `docs/architecture/video-streaming-scaling-and-bottlenecks.md` is
   forward-looking analysis of scaling limits; most of it is not built yet.
-- `docs/plans/` holds plans for features that are not built yet: watch
-  history, and recommendations (which builds on watch history).
+- `docs/architecture/private-media-delivery.md` records how the streams are
+  kept private (CloudFront signed cookies on one edge distribution).
+- `docs/plans/` holds feature plans: watch history (built), and
+  recommendations (not built yet; it builds on watch history).
 
 ---
 

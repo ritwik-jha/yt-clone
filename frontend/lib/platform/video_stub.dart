@@ -7,11 +7,17 @@ PlayerController createPlayerController() => StubPlayerController();
 
 class StubPlayerController extends PlayerController {
   PlaybackSource? source;
+  Duration? startAt;
 
   @override
-  Future<void> open(PlaybackSource source, {bool autoplay = true}) async {
+  Future<void> open(
+    PlaybackSource source, {
+    bool autoplay = true,
+    Duration? startAt,
+  }) async {
     this.source = source;
-    value = const PlayerValue();
+    this.startAt = startAt;
+    value = PlayerValue(position: startAt ?? Duration.zero);
     if (autoplay) await play();
   }
 

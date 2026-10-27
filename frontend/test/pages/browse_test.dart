@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -141,7 +143,10 @@ void main() {
       final player = h.players.single;
       expect(
         player.source,
-        const PlaybackSource('https://cdn/g/master.m3u8', StreamKind.hls),
+        const PlaybackSource(
+          'http://api.test/media/g/dash/master.m3u8',
+          StreamKind.hls,
+        ),
       );
       expect(find.text('Bob Tester'), findsWidgets);
       // Playback started, so this view is already counted.
@@ -153,6 +158,47 @@ void main() {
       // The stub autoplayed: one view counted.
       verify(() => h.videos.recordView('g')).called(1);
     });
+
+    testWidgets('the stream opens once this browser may stream it', (
+      tester,
+    ) async {
+      final gate = Completer<DateTime?>();
+      h.authorizePlayback = (_) => gate.future;
+      await h.pump(tester, location: '/watch?v=g');
+      final player = h.players.single;
+      expect(player.source, isNull);
+      gate.complete(DateTime.now().add(const Duration(hours: 1)));
+      await tester.pumpAndSettle();
+      expect(player.source, isNotNull);
+      verify(() => h.videos.authorizePlayback('g')).called(1);
+    });
+
+    testWidgets(
+      'a failed stream is reopened where it stopped, with fresh cookies, '
+      'once a minute at most',
+      (tester) async {
+        await h.pump(tester, location: '/watch?v=g');
+        final player = h.players.single;
+        verify(() => h.videos.authorizePlayback('g')).called(1);
+
+        // E.g. the cookies expired while the tab slept: the CDN said 403.
+        player.value = player.value.copyWith(
+          position: const Duration(seconds: 42),
+          error: "This video can't be played right now.",
+        );
+        await tester.pumpAndSettle();
+        verify(() => h.videos.authorizePlayback('g')).called(1);
+        expect(player.startAt, const Duration(seconds: 42));
+        expect(player.value.error, isNull);
+        expect(player.value.playing, isTrue);
+
+        // Failing again right away is a real failure: it stays on screen.
+        player.value = player.value.copyWith(error: 'Still broken');
+        await tester.pumpAndSettle();
+        verifyNever(() => h.videos.authorizePlayback(any()));
+        expect(find.text('Still broken'), findsOneWidget);
+      },
+    );
 
     testWidgets('player controls drive the controller', (tester) async {
       await h.pump(tester, location: '/watch?v=g');

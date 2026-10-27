@@ -44,6 +44,13 @@ const _feedTitles = [
   'Ten-minute dal tadka',
   'City timelapse at night',
 ];
+// Alice's seeded watch history (seed_data.HISTORY), newest first.
+const _aliceHistory = [
+  'Hiking the Western Ghats',
+  'City timelapse at night',
+  'Fingerstyle guitar basics',
+  'Private video diary',
+];
 const _aliceTitles = [
   'Still transcoding',
   'Hiking the Western Ghats',
@@ -104,6 +111,27 @@ class _ScriptedBrowser implements Browser {
 
   @override
   Future<void> setFullscreen(bool on) => _real.setFullscreen(on);
+
+  @override
+  String? readLocal(String key) => _real.readLocal(key);
+
+  @override
+  void writeLocal(String key, String value) => _real.writeLocal(key, value);
+
+  @override
+  void removeLocal(String key) => _real.removeLocal(key);
+
+  @override
+  List<String> localKeys(String prefix) => _real.localKeys(prefix);
+
+  @override
+  void Function() listenForVisibility({
+    required void Function() onHidden,
+    required void Function() onVisible,
+  }) => _real.listenForVisibility(onHidden: onHidden, onVisible: onVisible);
+
+  @override
+  void postOnExit(String url, String json) => _real.postOnExit(url, json);
 }
 
 /// 64 KB that claim to be an MP4. The browser can't decode them, so the
@@ -140,6 +168,13 @@ Future<PickedFile> _png() async {
   );
 }
 
+/// The red bar on a thumbnail (WatchedBar draws it only when watched).
+final _watchedBar = find.byWidgetPredicate(
+  (w) =>
+      w.key is ValueKey<String> &&
+      (w.key! as ValueKey<String>).value.startsWith('watched-'),
+);
+
 Future<void> _pumpUntil(
   WidgetTester tester,
   Finder finder, {
@@ -155,6 +190,27 @@ Future<void> _pumpUntil(
     }
   }
   throw TestFailure('Timed out waiting for $finder');
+}
+
+/// Waits until the test server's CDN stand-in (backend
+/// tests/support/server.py) served a path ending in [suffix], and checks it
+/// was let through rather than refused.
+Future<void> _waitForMedia(WidgetTester tester, Dio api, String suffix) async {
+  final end = DateTime.now().add(const Duration(seconds: 20));
+  List<dynamic> seen = const [];
+  while (DateTime.now().isBefore(end)) {
+    await tester.pump(const Duration(milliseconds: 200));
+    seen = (await api.get<List<dynamic>>('/_cdn/log')).data!;
+    final hits = [
+      for (final e in seen)
+        if ((e as List<dynamic>).first.toString().endsWith(suffix)) e[1] as int,
+    ];
+    if (hits.isNotEmpty) {
+      expect(hits.first, 200, reason: 'media requests: $seen');
+      return;
+    }
+  }
+  throw TestFailure('No media request for *$suffix; saw $seen');
 }
 
 Future<void> _type(WidgetTester tester, Finder field, String text) async {
@@ -276,11 +332,14 @@ void main() {
     expect(find.byType(VideoListTile), findsOneWidget);
     expect(find.text('Fingerstyle guitar basics'), findsOneWidget);
 
-    // 6. Watch it: details from the backend, no owner actions.
+    // 6. Watch it: details from the backend, no owner actions. The player
+    // asked the CDN stand-in for the playlist with the signed cookies the
+    // page got first (POST /video/{id}/playback), and was let through.
     await _tap(tester, find.text('Fingerstyle guitar basics'));
     await _pumpUntil(tester, find.text('SHARE'));
     expect(find.text('Bob Tester'), findsWidgets);
     expect(find.text('EDIT'), findsNothing);
+    await _waitForMedia(tester, api, '/master.m3u8');
 
     // 7. The creator's channel lists their two public, ready videos.
     await _tap(tester, find.text('Bob Tester').first);
@@ -292,14 +351,70 @@ void main() {
     await _tap(tester, find.widgetWithText(OutlinedButton, 'SIGN IN').first);
     await _signIn(tester, _alice);
 
-    // 9. Your videos lists all of Alice's uploads, private and unfinished too.
+    // 9. Watch history: a bar on the finished video's card on Home; History
+    // lists Alice's seeded rows newest first; remove + undo; clear all.
+    // (The seeded videos point at a CDN that doesn't exist, so nothing here
+    // plays: recording and resume are covered by the widget tests.)
+    await _tap(tester, find.text('Home').first);
+    await _pumpUntil(tester, find.text('Fingerstyle guitar basics'));
+    final guitarCard = find.ancestor(
+      of: find.text('Fingerstyle guitar basics'),
+      matching: find.byType(VideoGridCard),
+    );
+    await _pumpUntil(
+      tester,
+      find.descendant(of: guitarCard, matching: _watchedBar),
+    );
+    final dalCard = find.ancestor(
+      of: find.text('Ten-minute dal tadka'),
+      matching: find.byType(VideoGridCard),
+    );
+    expect(find.descendant(of: dalCard, matching: _watchedBar), findsNothing);
+
+    await _tap(tester, find.text('History'));
+    await _pumpUntil(tester, find.text('Watch history'));
+    for (final title in _aliceHistory) {
+      await _pumpUntil(tester, find.text(title));
+    }
+    for (var i = 1; i < _aliceHistory.length; i++) {
+      expect(
+        at(_aliceHistory[i]).dy,
+        greaterThan(at(_aliceHistory[i - 1]).dy),
+        reason: '${_aliceHistory[i]} should follow ${_aliceHistory[i - 1]}',
+      );
+    }
+    final timelapseRow = find.ancestor(
+      of: find.text('City timelapse at night'),
+      matching: find.byType(VideoListTile),
+    );
+    await _tap(
+      tester,
+      find.descendant(
+        of: timelapseRow,
+        matching: find.byTooltip('Remove from watch history'),
+      ),
+    );
+    await _pumpUntil(tester, find.text('UNDO'));
+    expect(find.text('City timelapse at night'), findsNothing);
+    await _tap(tester, find.text('UNDO'));
+    await _pumpUntil(tester, find.text('City timelapse at night'));
+
+    await _tap(tester, find.text('Clear all watch history'));
+    await _pumpUntil(tester, find.text('CLEAR WATCH HISTORY'));
+    await _tap(tester, find.text('CLEAR WATCH HISTORY'));
+    await _pumpUntil(tester, find.text('Videos you watch will show up here.'));
+    for (final title in _aliceHistory) {
+      expect(find.text(title), findsNothing);
+    }
+
+    // 10. Your videos lists all of Alice's uploads, private and unfinished too.
     await _accountMenu(tester, 'Your videos');
     await _pumpUntil(tester, find.text('Your videos').last);
     for (final title in _aliceTitles) {
       await _pumpUntil(tester, find.text(title));
     }
 
-    // 10. Edit a title; the backend has it afterwards.
+    // 11. Edit a title; the backend has it afterwards.
     const newTitle = 'Dal tadka, edited end to end';
     // The Edit button on the same row as the title.
     final titleY = tester.getCenter(find.text('Ten-minute dal tadka')).dy;
@@ -326,7 +441,7 @@ void main() {
     expect(titles, contains(newTitle));
     expect(titles, isNot(contains('Ten-minute dal tadka')));
 
-    // 11. Upload from the browser: the video can't be decoded, so it asks
+    // 12. Upload from the browser: the video can't be decoded, so it asks
     // for a thumbnail image; both go to the presigned URLs, then the save.
     browser.picks
       ..add(_fakeVideo())
@@ -344,7 +459,7 @@ void main() {
     await _pumpUntil(tester, find.text('e2e-clip'));
     expect(find.text('Pending'), findsOneWidget);
 
-    // 12. Sign out from a signed-in-only page: back to Sign in.
+    // 13. Sign out from a signed-in-only page: back to Sign in.
     await _accountMenu(tester, 'Sign out');
     await _pumpUntil(tester, find.widgetWithText(FilledButton, 'Sign In'));
     expect(find.byTooltip('Account'), findsNothing);

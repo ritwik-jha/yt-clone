@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Integration test for a deployed stack, run through the web app's URL.
 
-Everything goes through the frontend origin, the way the browser does it:
-the static app, the API behind the frontend's nginx proxy, the auth cookies,
-presigned uploads to S3, the transcoding pipeline, and playback from
-CloudFront. It creates a throwaway account and video and removes both at the
-end (unless --keep).
+Everything goes through the frontend origin (the edge CloudFront
+distribution), the way the browser does it: the static app, the API behind
+the frontend's nginx proxy, the auth cookies, presigned uploads to S3, the
+transcoding pipeline, and playback from /media/ behind the signed cookies.
+It creates a throwaway account and video and removes both at the end
+(unless --keep).
 
     python3 scripts/deploy_smoke_test.py https://<frontend> \
         --user-pool-id <pool> --region <region> [--browser]
@@ -30,18 +31,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
 RESULTS: list[dict] = []
+NO_VIDEO = "00000000-0000-0000-0000-000000000000"
 
 
 class CheckFailed(Exception):
@@ -121,6 +125,9 @@ def static_checks(web: httpx.Client) -> None:
     for path in ("/vendor/hls.js-1.5.20/hls.min.js", "/vendor/dashjs-4.7.4/dash.all.min.js"):
         r = expect(web.get(path), 200, f"player library {path}")
         check(f"{path} is JavaScript", "javascript" in r.headers.get("content-type", ""))
+    # Without the /media/* behaviour nginx would answer index.html (200).
+    r = expect(web.get(f"/media/{NO_VIDEO}/dash/master.m3u8"), 403,
+               "/media/ without signed cookies is refused at the edge")
 
 
 def api_checks(web: httpx.Client) -> None:
@@ -133,6 +140,12 @@ def api_checks(web: httpx.Client) -> None:
            "GET /video/feed?sort=popular")
     expect(web.get("/video/search", params={"q": "zz-no-such-video"}), 200, "GET /video/search")
     expect(web.get("/auth/me"), 401, "GET /auth/me without cookies is 401")
+    # nginx answers an unproxied path with index.html (200), so a JSON 401
+    # proves /history reaches the API.
+    r = expect(web.get("/history"), 401, "GET /history without cookies is 401 (proxied)")
+    check("/history answers JSON missing_access_token",
+          r.headers.get("content-type", "").startswith("application/json")
+          and r.json().get("code") == "missing_access_token", r.text[:100])
 
 
 def browser_checks(url: str, artifacts: Path, video_id: str | None, playable: bool,
@@ -160,7 +173,7 @@ def browser_checks(url: str, artifacts: Path, video_id: str | None, playable: bo
         if video_id and playable:
             with page.expect_response(lambda r: r.url.endswith("master.m3u8"), timeout=90_000) as hls:
                 page.goto(urljoin(url, f"/watch?v={video_id}"), wait_until="load")
-            check("watch page fetches the HLS playlist from CloudFront",
+            check("watch page fetches the HLS playlist with its signed cookies",
                   hls.value.status == 200, f"HTTP {hls.value.status}")
             page.wait_for_timeout(5000)
             page.screenshot(path=str(artifacts / "watch.png"))
@@ -170,7 +183,7 @@ def browser_checks(url: str, artifacts: Path, video_id: str | None, playable: bo
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("url", help="frontend URL, e.g. https://xxxx.ecs.ap-south-1.on.aws")
+    ap.add_argument("url", help="frontend URL, e.g. https://dxxxxxxxxxxxxx.cloudfront.net")
     ap.add_argument("--user-pool-id")
     ap.add_argument("--region")
     ap.add_argument("--otp", help="verification code (local test server: 123456)")
@@ -285,17 +298,54 @@ def main() -> int:
             check("hls_url, manifest_url and duration set",
                   bool(d.get("hls_url") and d.get("manifest_url") and d.get("duration_seconds")),
                   f"duration={d.get('duration_seconds')}")
-            r = expect(cdn.get(d["hls_url"]), 200, "HLS master playlist from CloudFront")
+            check("stream URLs are under /media/ on the app's origin",
+                  d["hls_url"].startswith("/media/") and d["manifest_url"].startswith("/media/"),
+                  d["hls_url"])
+            folder = posixpath.dirname(d["hls_url"]) + "/"
+            expect(web.get(d["hls_url"]), 403, "HLS playlist before POST /playback is refused")
+            r = expect(web.post(f"/video/{video_id}/playback"), 200, "POST /video/{id}/playback")
+            check("no-store on the playback answer", r.headers.get("cache-control") == "no-store")
+            left = datetime.fromisoformat(r.json()["expires_at"]) - datetime.now(timezone.utc)
+            check("cookies last about MEDIA_COOKIE_TTL_SECONDS", 600 < left.total_seconds() <= 86400,
+                  f"{int(left.total_seconds())}s")
+            signed = {c.split("=", 1)[0]: c.lower() for c in r.headers.get_list("set-cookie")}
+            check("CloudFront-Policy, -Signature and -Key-Pair-Id set", set(signed) == {
+                "CloudFront-Policy", "CloudFront-Signature", "CloudFront-Key-Pair-Id"}, ", ".join(signed))
+            check(f"signed cookies scoped to {folder}, HttpOnly",
+                  all(f"path={folder.lower()}" in v and "httponly" in v for v in signed.values()))
+            if https:
+                check("signed cookies are Secure", all("secure" in v for v in signed.values()))
+
+            r = expect(web.get(d["hls_url"]), 200, "HLS master playlist with the cookies")
             check("master playlist is HLS", r.text.startswith("#EXTM3U"))
-            check("CloudFront adds CORS to playlists", "access-control-allow-origin" in r.headers)
             media = next(l for l in r.text.splitlines() if l and not l.startswith("#"))
-            r = expect(cdn.get(urljoin(d["hls_url"], media)), 200, f"media playlist {media}")
+            r = expect(web.get(urljoin(d["hls_url"], media)), 200, f"media playlist {media}")
             seg = next(l for l in r.text.splitlines() if l and not l.startswith("#"))
-            expect(cdn.get(urljoin(urljoin(d["hls_url"], media), seg)), 200, f"first segment {seg}")
-            r = expect(cdn.get(d["manifest_url"]), 200, "DASH manifest from CloudFront")
+            expect(web.get(urljoin(urljoin(d["hls_url"], media), seg)), 200, f"first segment {seg}")
+            r = expect(web.get(d["manifest_url"]), 200, "DASH manifest with the cookies")
             check("manifest is DASH", "<MPD" in r.text)
+            expect(web.get(d["hls_url"] + "?v=1"), 400, "query strings on /media/ are refused")
+            # The browser wouldn't send them there (Path); a client that does
+            # is refused by the policy.
+            stolen = {k: web.cookies.get(k, path=folder) for k in signed}
+            with httpx.Client(base_url=url, cookies=stolen, timeout=30) as thief:
+                expect(thief.get(d["hls_url"]), 200, "the cookies work from another client")
+                expect(thief.get(f"/media/{NO_VIDEO}/dash/master.m3u8"), 403,
+                       "the cookies don't open another video's folder")
             r = expect(cdn.get(d["thumbnail_url"]), 200, "thumbnail from its CloudFront")
             check("thumbnail is an image", r.headers.get("content-type", "").startswith("image/"))
+
+            # Who may stream follows who may watch.
+            with httpx.Client(base_url=url, timeout=30) as anon:
+                expect(anon.post(f"/video/{video_id}/playback"), 200,
+                       "signed out, a PUBLIC video may be streamed")
+                expect(web.patch(f"/video/{video_id}", json={"visibility": "PRIVATE"}), 200,
+                       "PATCH visibility PRIVATE")
+                expect(anon.post(f"/video/{video_id}/playback"), 404,
+                           "signed out, a PRIVATE video may not be streamed")
+                expect(web.post(f"/video/{video_id}/playback"), 200, "its owner still may")
+                expect(web.patch(f"/video/{video_id}", json={"visibility": "PUBLIC"}), 200,
+                       "PATCH visibility PUBLIC")
             playable = True
 
             section("Listings")
@@ -310,6 +360,21 @@ def main() -> int:
         r = expect(web.patch(f"/video/{video_id}", json={"title": title + " (edited)"}),
                    200, "PATCH /video/{id}")
         check("title updated", r.json().get("title") == title + " (edited)")
+
+        section("Watch history")
+        h = expect(web.get("/history"), 200, "GET /history").json()
+        check("a new account has no history", h.get("items") == [], json.dumps(h)[:100])
+        if playable:
+            watched = datetime.now(timezone.utc).isoformat()
+            r = expect(web.post("/history/progress", json={"entries": [
+                {"video_id": video_id, "position_seconds": 1, "watched_at": watched},
+            ]}), 200, "POST /history/progress").json()
+            check("progress saved", r["results"][0]["result"] == "saved", json.dumps(r)[:200])
+            h = expect(web.get("/history"), 200, "GET /history").json()
+            check("history lists the video", [i["video"]["id"] for i in h["items"]] == [video_id])
+            expect(web.delete("/history"), 204, "DELETE /history")
+            h = expect(web.get("/history"), 200, "GET /history").json()
+            check("cleared history is empty", h.get("items") == [])
 
         if args.browser:
             browser_checks(url, artifacts, video_id, playable, args.chromium)

@@ -1,7 +1,16 @@
 output "frontend_url" {
-  description = "The web app (HTTPS, AWS-issued certificate). The API is served on the same origin."
-  # Newer provider versions return the endpoint with its scheme already.
-  value = try("https://${trimprefix(aws_ecs_express_gateway_service.frontend.ingress_paths[0].endpoint, "https://")}", null)
+  description = "The web app, through the edge distribution. The API and the playback media (/media/) are served on the same origin."
+  value       = "https://${aws_cloudfront_distribution.edge.domain_name}"
+}
+
+output "origin_url" {
+  description = "The web app's Express Mode ALB, behind the edge distribution. Streams don't play here: /media/ exists only on frontend_url."
+  value       = try("https://${local.frontend_origin_host}", null)
+}
+
+output "edge_distribution_id" {
+  description = "For invalidations, e.g. after deleting a video whose segments are cached."
+  value       = aws_cloudfront_distribution.edge.id
 }
 
 output "api_url" {

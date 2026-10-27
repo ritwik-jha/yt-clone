@@ -381,6 +381,7 @@ class _Featured extends StatelessWidget {
       child: VideoThumbnail(
         url: video.thumbnailUrl,
         durationSeconds: video.durationSeconds,
+        videoId: video.id,
       ),
     );
     return LayoutBuilder(

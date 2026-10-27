@@ -18,15 +18,16 @@ Fargate service, and the RDS PostgreSQL instance both use. Applied **after**
 | `ecs.tf` | Cluster, per-service environment maps, `aws_ecs_express_gateway_service.api`, poller task definition + `aws_ecs_service.poller` |
 | `storage.tf` | Thumbnails S3 bucket (public access blocked, SSE, CORS for presigned PUT) |
 | `cloudfront.tf` | OAC, thumbnails distribution (managed CachingOptimized + SimpleCORS policies), bucket policy allowing only this distribution to read |
+| `media_signing.tf` | The playback-cookie key: reads the public PEM from SSM `<media_signing_parameter_prefix>/public`, `aws_cloudfront_public_key` (name prefix, create-before-destroy) and `aws_cloudfront_key_group.media`, which the edge distribution in `../../frontend/terraform` trusts for `/media/*`; the private key's parameter ARN for the API's `secret` |
 | `logs.tf` | CloudWatch log group `/<backend_name>` with `api/` and `poller/` stream prefixes |
 | `ecr.tf` | Backend image repo, scan-on-push, 10-image lifecycle |
-| `outputs.tf` | `api_url`, `ecs_cluster`, `api_service_name`, `api_service_arn`, `poller_service_name`, `api_security_group_id`, `ecr_repository_url`, `backend_image`, `thumbnails_bucket`, `thumbnails_cdn_domain`, `db_endpoint`, `db_secret_arn`, `log_group` |
+| `outputs.tf` | `api_url`, `ecs_cluster`, `api_service_name`, `api_service_arn`, `poller_service_name`, `api_security_group_id`, `ecr_repository_url`, `backend_image`, `thumbnails_bucket`, `thumbnails_cdn_domain`, `media_key_group_id`, `db_endpoint`, `db_secret_arn`, `log_group` |
 
 ## Conventions
 
 - **This stack never declares pipeline resources.** VPC, subnets, buckets,
-  queues, Redis, Cognito, the Cognito secret parameter, and the playback
-  CloudFront domain all come from `local.pipeline`
+  queues, Redis, Cognito, and the Cognito secret parameter all come from
+  `local.pipeline`
   (`data.terraform_remote_state.pipeline.outputs`). If you need a new
   coordinate, add an output to `../../IAC/terraform/outputs.tf`. Don't rebuild
   the value from name fragments.
@@ -41,13 +42,18 @@ Fargate service, and the RDS PostgreSQL instance both use. Applied **after**
   (`manage_master_user_password`), so it never enters state; the task roles
   get `secretsmanager:GetSecretValue` on that one secret and the app reads it
   at connect time. Never set `password` on the instance or put `DB_PASSWORD`
-  in a task environment.
+  in a task environment. The playback signing key follows the same rule:
+  DEPLOY_AWS.md §4.1 makes it with openssl and stores it in SSM; this stack
+  reads only the public half (`media_signing.tf`) and hands the private
+  half's ARN to the API's `secret` block. Never generate it with
+  `tls_private_key`, which would put it in state.
 - **One role pair per service.** The API task role has no SQS access. Its S3
   rights are `PutObject` (presigned uploads) and `DeleteObject` on the raw
   `videos/*` and `thumbnails/*` prefixes, plus `DeleteObject` and
   `ListBucket` on the pipeline's processed bucket, for `DELETE /video/{id}`.
   The poller task role has no Cognito or S3 access, and the Cognito client
-  secret is readable only by the API execution role. Grant new permissions to
+  secret and the media signing key are readable only by the API execution
+  role. Grant new permissions to
   the one role that needs them.
 - **Mind the connection budget.** Each API task opens up to 2 workers ×
   (`api_db_pool_size` + `api_db_max_overflow`) connections, the poller 1.

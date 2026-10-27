@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -16,8 +18,12 @@ import '../cubits/session/session_state.dart';
 import '../cubits/video_detail/video_detail_cubit.dart';
 import '../cubits/video_detail/video_detail_state.dart';
 import '../models/video.dart';
+import '../models/watch_progress.dart';
 import '../platform/browser.dart';
 import '../platform/video_player.dart';
+import '../services/history_sync.dart';
+import '../services/playback_access.dart';
+import '../services/progress_tracker.dart';
 import '../services/video_service.dart';
 import '../widgets/auth_scaffold.dart';
 import '../widgets/avatar.dart';
@@ -26,6 +32,7 @@ import '../widgets/edit_video_dialog.dart';
 import '../widgets/error_view.dart';
 import '../widgets/link.dart';
 import '../widgets/player_view.dart';
+import '../widgets/resume_chip.dart';
 import '../widgets/skeletons.dart';
 import '../widgets/status_chip.dart';
 import '../widgets/video_list_tile.dart';
@@ -49,21 +56,56 @@ class _WatchPageState extends State<WatchPage> {
   )..load(widget.videoId);
   late final PlayerController _player = context.read<PlayerFactory>().create();
   late final Browser _browser = context.read<Browser>();
+  late final HistorySync _history = context.read<HistorySync>();
   final _playerKey = GlobalKey();
   PlaybackSource? _opened;
   bool _counted = false;
+
+  /// The signed CDN cookies this video's stream needs.
+  late final PlaybackAccess _access = PlaybackAccess(
+    context.read<VideoService>(),
+    widget.videoId,
+  );
+
+  /// What the player loaded for [_opened] (its URL resolved).
+  PlaybackSource? _loaded;
+
+  /// A failed stream is reopened once a minute at most: after fresh cookies
+  /// (they may have expired while the tab slept), from where it stopped.
+  static const _retryGap = Duration(minutes: 1);
+  DateTime? _lastRetry;
+  bool _retrying = false;
+
+  /// Where to resume, decided at most [_resumeWait] after the page opened.
+  late final Future<WatchProgress?> _resume = _lookUpResume();
+  static const _resumeWait = Duration(milliseconds: 1500);
+  Duration? _resumedFrom;
+
+  /// Records this video into watch history while someone is signed in.
+  ProgressTracker? _tracker;
+  StreamSubscription<SessionState>? _sessionSub;
 
   @override
   void initState() {
     super.initState();
     _player.addListener(_onPlayer);
     _browser; // resolved now: dispose() can't look it up
+    _history;
+    _access;
+    _resume;
+    final session = context.read<SessionCubit>();
+    _followSession(session.state);
+    _sessionSub = session.stream.listen(_followSession);
   }
 
   @override
   void dispose() {
+    _sessionSub?.cancel();
+    // Reports where playback stopped, so it goes before the player.
+    if (_tracker case final t?) _history.untrack(t);
     _player.removeListener(_onPlayer);
     _player.dispose();
+    _access.dispose();
     _detail.close();
     if (_browser.fullscreen.value) _browser.setFullscreen(false);
     super.dispose();
@@ -75,15 +117,70 @@ class _WatchPageState extends State<WatchPage> {
       _counted = true;
       _detail.recordView();
     }
+    if (_player.value.error != null) _retryAfterError();
+  }
+
+  Future<void> _retryAfterError() async {
+    final loaded = _loaded;
+    final now = DateTime.now();
+    if (loaded == null ||
+        _retrying ||
+        (_lastRetry != null && now.difference(_lastRetry!) < _retryGap)) {
+      return;
+    }
+    _retrying = true;
+    _lastRetry = now;
+    final at = _player.value.position;
+    await _access.renew();
+    _retrying = false;
+    if (!mounted || _loaded != loaded) return;
+    _player.open(loaded, startAt: at > Duration.zero ? at : null);
+  }
+
+  void _followSession(SessionState state) {
+    if (state is SessionAuthenticated && _tracker == null) {
+      _tracker = _history.track(_player, widget.videoId);
+    } else if (state is SessionUnauthenticated && _tracker != null) {
+      _history.untrack(_tracker!);
+      _tracker = null;
+    }
+  }
+
+  /// The resume point, once the session is known. Gives up after
+  /// [_resumeWait]: seeking under the viewer's hands is worse than not
+  /// resuming.
+  Future<WatchProgress?> _lookUpResume() async {
+    final session = context.read<SessionCubit>();
+    Future<WatchProgress?> lookUp() async {
+      var state = session.state;
+      if (state is SessionUnknown) {
+        state = await session.stream.firstWhere((s) => s is! SessionUnknown);
+      }
+      if (state is! SessionAuthenticated) return null;
+      return _history.resumePoint(widget.videoId);
+    }
+
+    try {
+      return await lookUp().timeout(_resumeWait);
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<void> _open(PlaybackSource source) async {
+    _opened = source;
+    final (progress, loaded) = await (_resume, _access.prepare(source)).wait;
+    if (!mounted || _opened != source) return;
+    _loaded = loaded;
+    final at = progress?.resumeAt;
+    _player.open(loaded, startAt: at);
+    if (at != null) setState(() => _resumedFrom = at);
   }
 
   void _onDetail(BuildContext context, VideoDetailState state) {
     if (state case VideoDetailReady(:final video)) {
       final source = video.playbackSource;
-      if (source != null && source != _opened) {
-        _opened = source;
-        _player.open(source);
-      }
+      if (source != null && source != _opened) _open(source);
     }
     if (state is VideoDetailDeleted) context.go(Routes.myVideos);
   }
@@ -105,6 +202,7 @@ class _WatchPageState extends State<WatchPage> {
               controller: _player,
               fullscreen: fullscreen,
               onToggleFullscreen: _toggleFullscreen,
+              resumedFrom: _resumedFrom,
             );
             if (fullscreen) return player;
             return ColoredBox(
@@ -218,6 +316,7 @@ class _PlayerArea extends StatelessWidget {
     required this.controller,
     required this.fullscreen,
     required this.onToggleFullscreen,
+    this.resumedFrom,
   });
 
   final VideoDetailState state;
@@ -225,14 +324,32 @@ class _PlayerArea extends StatelessWidget {
   final bool fullscreen;
   final VoidCallback onToggleFullscreen;
 
+  /// Set when playback resumed part-way: shows [ResumeChip].
+  final Duration? resumedFrom;
+
   @override
   Widget build(BuildContext context) => switch (state) {
-    VideoDetailReady(:final video) when video.isPlayable => PlayerView(
-      controller: controller,
-      title: video.title,
-      posterUrl: video.thumbnailUrl,
-      fullscreen: fullscreen,
-      onToggleFullscreen: onToggleFullscreen,
+    VideoDetailReady(:final video) when video.isPlayable => Stack(
+      fit: StackFit.expand,
+      children: [
+        PlayerView(
+          controller: controller,
+          title: video.title,
+          posterUrl: video.thumbnailUrl,
+          fullscreen: fullscreen,
+          onToggleFullscreen: onToggleFullscreen,
+        ),
+        if (resumedFrom != null && !fullscreen)
+          Positioned(
+            left: 12,
+            bottom: 56,
+            child: ResumeChip(
+              key: ValueKey(resumedFrom),
+              from: resumedFrom!,
+              onStartOver: () => controller.seekTo(Duration.zero),
+            ),
+          ),
+      ],
     ),
     VideoDetailReady(:final video) => _Placeholder(
       video: video,

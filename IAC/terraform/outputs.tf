@@ -73,6 +73,11 @@ output "raw_bucket_arn" {
   value = aws_s3_bucket.raw.arn
 }
 
+output "processed_bucket_regional_domain_name" {
+  description = "S3 origin domain for the processed bucket. The edge distribution (frontend/terraform/cloudfront.tf) serves it under /media/ to holders of signed cookies."
+  value       = aws_s3_bucket.processed.bucket_regional_domain_name
+}
+
 output "processed_bucket_arn" {
   value = aws_s3_bucket.processed.arn
 }
@@ -113,13 +118,4 @@ output "cognito_user_pool_client_secret" {
 output "cognito_client_secret_parameter_arn" {
   description = "SSM SecureString the backend API task reads COGNITO_CLIENT_SECRET from."
   value       = aws_ssm_parameter.cognito_client_secret.arn
-}
-
-output "cloudfront_domain_name" {
-  description = "Playback domain for the processed bucket. The backend serves manifest_url = https://<this>/<dash_manifest_s3_key>."
-  value       = aws_cloudfront_distribution.processed.domain_name
-}
-
-output "cloudfront_distribution_id" {
-  value = aws_cloudfront_distribution.processed.id
 }

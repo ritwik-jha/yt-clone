@@ -8,6 +8,7 @@ import 'package:ytp_app/models/channel.dart';
 import 'package:ytp_app/models/page_result.dart';
 import 'package:ytp_app/models/user_profile.dart';
 import 'package:ytp_app/models/video.dart';
+import 'package:ytp_app/models/watch_progress.dart';
 import 'package:ytp_app/platform/browser.dart';
 import 'package:ytp_app/platform/video_stub.dart';
 import 'package:ytp_app/services/video_service.dart';
@@ -31,8 +32,9 @@ Video video(
   title: title,
   description: description,
   thumbnailUrl: '',
-  hlsUrl: 'https://cdn/$id/master.m3u8',
-  manifestUrl: 'https://cdn/$id/manifest.mpd',
+  // As the API answers them: relative to its origin (VideoService.streamUrl).
+  hlsUrl: '/media/$id/dash/master.m3u8',
+  manifestUrl: '/media/$id/dash/manifest.mpd',
   viewsCount: views,
   durationSeconds: 61,
   creator: creator,
@@ -49,12 +51,57 @@ final unauthorized = ApiException.fromResponse(401, <String, dynamic>{
   'detail': 'Missing access token',
 });
 
-/// A scriptable [Browser]: [picks] answers file choosers in order.
+/// A scriptable [Browser]: [picks] answers file choosers in order,
+/// [storage] is its localStorage, [hide] and [show] play the tab's
+/// visibility, and [exitPosts] records keepalive POSTs.
 class FakeBrowser implements Browser {
   final picks = <PickedFile?>[];
   final warnings = <bool>[];
   PickedFile? frame;
   final _fullscreen = ValueNotifier(false);
+  final storage = <String, String>{};
+  final exitPosts = <(String url, String json)>[];
+  final _visibility = <(void Function(), void Function())>[];
+
+  void hide() {
+    for (final (onHidden, _) in [..._visibility]) {
+      onHidden();
+    }
+  }
+
+  void show() {
+    for (final (_, onVisible) in [..._visibility]) {
+      onVisible();
+    }
+  }
+
+  @override
+  String? readLocal(String key) => storage[key];
+
+  @override
+  void writeLocal(String key, String value) => storage[key] = value;
+
+  @override
+  void removeLocal(String key) => storage.remove(key);
+
+  @override
+  List<String> localKeys(String prefix) => [
+    for (final k in storage.keys)
+      if (k.startsWith(prefix)) k,
+  ];
+
+  @override
+  void Function() listenForVisibility({
+    required void Function() onHidden,
+    required void Function() onVisible,
+  }) {
+    final entry = (onHidden, onVisible);
+    _visibility.add(entry);
+    return () => _visibility.remove(entry);
+  }
+
+  @override
+  void postOnExit(String url, String json) => exitPosts.add((url, json));
 
   @override
   ValueListenable<bool> get fullscreen => _fullscreen;
@@ -105,6 +152,7 @@ class Harness {
   final auth = MockAuthService();
   final videos = MockVideoService();
   final uploads = MockUploadService();
+  final history = MockHistoryService();
   final browser = FakeBrowser();
   final players = <StubPlayerController>[];
 
@@ -114,9 +162,72 @@ class Harness {
   /// Channel ids that answer `channel_not_found`.
   final missingChannels = <String>{};
 
+  /// The signed-in user's history: what `positions` and `list` answer.
+  final watched = <String, WatchProgress>{};
+
   static void registerFallbacks() {
     registerFallbackValue(VideoSort.latest);
     registerFallbackValue(const VideoUpdate());
+    registerFallbackValue(<ProgressReport>[]);
+  }
+
+  /// Every report is saved; positions and the list come from [watched].
+  void stubHistory() {
+    when(() => history.exitUrl).thenReturn('http://api.test/history/progress');
+    when(() => history.record(any())).thenAnswer(
+      (inv) async => [
+        for (final r in inv.positionalArguments.first as List<ProgressReport>)
+          ProgressResult(
+            videoId: r.videoId,
+            outcome: ProgressOutcome.saved,
+            progress: WatchProgress.fromReport(r),
+          ),
+      ],
+    );
+    when(() => history.positions(any())).thenAnswer(
+      (inv) async => [
+        for (final id in inv.positionalArguments.first as List<String>)
+          ?watched[id],
+      ],
+    );
+    when(
+      () => history.list(
+        cursor: any(named: 'cursor'),
+        limit: any(named: 'limit'),
+      ),
+    ).thenAnswer((_) async {
+      final entries =
+          [
+            for (final p in watched.values)
+              for (final v in feed)
+                if (v.id == p.videoId) HistoryEntry(video: v, progress: p),
+          ]..sort(
+            (a, b) =>
+                b.progress.lastWatchedAt.compareTo(a.progress.lastWatchedAt),
+          );
+      return HistoryPage(items: entries);
+    });
+    when(() => history.remove(any())).thenAnswer((_) async {});
+    when(() => history.clear()).thenAnswer((_) async {});
+  }
+
+  /// What `authorizePlayback` answers; by default an hour of access.
+  Future<DateTime?> Function(String videoId)? authorizePlayback;
+
+  /// Streams are authorized ([authorizePlayback]); URLs resolve against the
+  /// API's origin, as [VideoService.streamUrl] does.
+  void stubPlayback() {
+    when(() => videos.authorizePlayback(any())).thenAnswer(
+      (inv) =>
+          authorizePlayback?.call(inv.positionalArguments.first as String) ??
+          Future.value(DateTime.now().add(const Duration(hours: 1))),
+    );
+    when(() => videos.streamUrl(any())).thenAnswer(
+      (inv) =>
+          Uri.parse('http://api.test')
+              .resolve(inv.positionalArguments.first as String)
+              .toString(),
+    );
   }
 
   void stubFeed() {
@@ -176,12 +287,15 @@ class Harness {
       when(() => auth.me()).thenAnswer((_) async => user);
     }
     stubFeed();
+    stubHistory();
+    stubPlayback();
     await tester.pumpWidget(
       YtpApp(
         apiBaseUrl: 'http://api.test',
         auth: auth,
         videos: videos,
         uploads: uploads,
+        history: history,
         browser: browser,
         players: PlayerFactory(() {
           final p = StubPlayerController();
@@ -191,8 +305,16 @@ class Harness {
         initialLocation: location,
       ),
     );
-    await tester.pumpAndSettle();
+    await settle(tester);
   }
+}
+
+/// [WidgetTester.pumpAndSettle], then once more for timers that the last
+/// frame started (the progress bars batch their lookups on a zero timer).
+Future<void> settle(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.pump();
+  await tester.pumpAndSettle();
 }
 
 /// The current URL of the app under test.

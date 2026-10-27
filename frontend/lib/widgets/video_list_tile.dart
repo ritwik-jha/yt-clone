@@ -11,15 +11,28 @@ import 'video_thumbnail.dart';
 /// A video as a row: thumbnail on the left, details on the right. Compact
 /// for the watch page's up-next column, large for search results.
 class VideoListTile extends StatelessWidget {
-  const VideoListTile({super.key, required this.video, this.large = false});
+  const VideoListTile({
+    super.key,
+    required this.video,
+    this.large = false,
+    this.meta,
+    this.trailing,
+  });
 
   final Video video;
   final bool large;
 
+  /// Replaces the "views • age" line (History: "Watched 2 hours ago").
+  final String? meta;
+
+  /// At the end of the row (History: remove from watch history).
+  final Widget? trailing;
+
   @override
   Widget build(BuildContext context) {
     final small = Theme.of(context).textTheme.bodySmall!;
-    final meta = large ? small : small.copyWith(fontSize: 12);
+    final metaStyle = large ? small : small.copyWith(fontSize: 12);
+    final metaLine = meta ?? viewsAndAge(video.viewsCount, video.createdAt);
     final watch = Routes.watch(video.id);
     final channel = Routes.channel(video.creator.id);
     return Row(
@@ -33,6 +46,7 @@ class VideoListTile extends StatelessWidget {
             child: VideoThumbnail(
               url: video.thumbnailUrl,
               durationSeconds: video.durationSeconds,
+              videoId: video.id,
             ),
           ),
         ),
@@ -56,10 +70,7 @@ class VideoListTile extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               if (large) ...[
-                Text(
-                  viewsAndAge(video.viewsCount, video.createdAt),
-                  style: meta,
-                ),
+                Text(metaLine, style: metaStyle),
                 const SizedBox(height: 12),
                 AppLink(
                   location: channel,
@@ -76,7 +87,7 @@ class VideoListTile extends StatelessWidget {
                         child: Text(
                           video.creator.name,
                           overflow: TextOverflow.ellipsis,
-                          style: meta,
+                          style: metaStyle,
                         ),
                       ),
                     ],
@@ -88,7 +99,7 @@ class VideoListTile extends StatelessWidget {
                     video.description!,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: meta.copyWith(fontSize: 12),
+                    style: metaStyle.copyWith(fontSize: 12),
                   ),
                 ],
               ] else ...[
@@ -98,19 +109,20 @@ class VideoListTile extends StatelessWidget {
                     video.creator.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: meta,
+                    style: metaStyle,
                   ),
                 ),
                 Text(
-                  viewsAndAge(video.viewsCount, video.createdAt),
+                  metaLine,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: meta,
+                  style: metaStyle,
                 ),
               ],
             ],
           ),
         ),
+        ?trailing,
       ],
     );
   }

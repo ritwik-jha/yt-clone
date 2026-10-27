@@ -48,6 +48,11 @@ output "thumbnails_cdn_domain" {
   value       = aws_cloudfront_distribution.thumbnails.domain_name
 }
 
+output "media_key_group_id" {
+  description = "CloudFront key group whose key signs the playback cookies; the edge distribution trusts it for /media/*."
+  value       = aws_cloudfront_key_group.media.id
+}
+
 output "db_endpoint" {
   description = "RDS PostgreSQL host:port. Reachable only from the API and poller tasks."
   value       = aws_db_instance.main.endpoint

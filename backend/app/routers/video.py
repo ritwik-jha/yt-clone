@@ -8,7 +8,9 @@ Edit and delete are owner-only and answer 404 to everyone else for the same
 reason. The feed, search, and channel pages list PUBLIC + COMPLETED only.
 
 Playback and thumbnail URLs are derived from the stored S3 keys at read time,
-so moving a CloudFront distribution needs no data migration.
+so moving a CloudFront distribution needs no data migration. The stream
+itself is only served to holders of the signed cookies POST
+/video/{id}/playback sets (app/media_signing.py).
 
 No handler here writes `status`: the completion poller owns every transition
 after POST /upload/video/save.
@@ -25,7 +27,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Respons
 from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
-from app import cache
+from app import cache, media_signing
 from app.clients import redis_client, s3
 from app.config import get_settings
 from app.db import get_db
@@ -33,9 +35,10 @@ from app.deps import get_current_user, get_optional_identity
 from app.errors import APIError
 from app.models import User, Video, VideoStatus, Visibility
 from app.schemas import (
-    ChannelResponse, Creator, CreatorDetail, FeedItem, FeedResponse,
-    MyVideosResponse, ProgressResponse, UpdateVideoRequest, VideoDetail,
+    ChannelResponse, CreatorDetail, FeedResponse, MyVideosResponse,
+    PlaybackResponse, ProgressResponse, UpdateVideoRequest, VideoDetail,
 )
+from app.video_views import feed_fields, to_feed_item
 
 log = logging.getLogger(__name__)
 
@@ -54,38 +57,9 @@ def _not_found() -> APIError:
     return APIError(404, "video_not_found", "Video not found")
 
 
-def _thumbnail_url(key: str) -> str:
-    return f"https://{get_settings().thumbnails_cdn_domain}/{key}"
-
-
-def _manifest_url(key: str | None) -> str | None:
-    return f"https://{get_settings().cloudfront_domain}/{key}" if key else None
-
-
-def _feed_fields(video: Video) -> dict:
-    return {
-        "id":               video.id,
-        "title":            video.title,
-        "description":      video.description,
-        "thumbnail_url":    _thumbnail_url(video.thumbnail_s3_key),
-        "manifest_url":     _manifest_url(video.dash_manifest_s3_key),
-        "hls_url":          _manifest_url(video.hls_manifest_s3_key),
-        "views_count":      video.views_count,
-        "duration_seconds": video.duration_seconds,
-        "created_at":       video.created_at,
-    }
-
-
-def _to_feed_item(video: Video) -> FeedItem:
-    return FeedItem(
-        **_feed_fields(video),
-        creator=Creator(id=video.user.id, name=video.user.name),
-    )
-
-
 def _to_detail(video: Video) -> VideoDetail:
     return VideoDetail(
-        **_feed_fields(video),
+        **feed_fields(video),
         creator=CreatorDetail(
             id=video.user.id, name=video.user.name, created_at=video.user.created_at,
         ),
@@ -118,7 +92,7 @@ def _page(
 
 def _feed_page(db: Session, where: ColumnElement[bool], page: int, limit: int, sort: SortParam) -> FeedResponse:
     total, rows = _page(db, where, page, limit, sort)
-    return FeedResponse(total=total, page=page, limit=limit, items=[_to_feed_item(v) for v in rows])
+    return FeedResponse(total=total, page=page, limit=limit, items=[to_feed_item(v) for v in rows])
 
 
 def _matches(query: str) -> ColumnElement[bool]:
@@ -276,7 +250,7 @@ def get_video(video_id: UUID, request: Request, db: Session = Depends(get_db)):
     video = _load_for_viewer(db, video_id, request)
     detail = _to_detail(video)
     if _publicly_viewable(video):
-        cache.put_video(detail)
+        cache.put_video(video)
     return detail
 
 
@@ -340,3 +314,34 @@ def record_view(video_id: UUID, request: Request, db: Session = Depends(get_db))
     )
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{video_id}/playback", response_model=PlaybackResponse)
+def authorize_playback(
+    video_id: UUID, request: Request, response: Response, db: Session = Depends(get_db),
+):
+    """Let this browser stream the video: sets the CloudFront signed cookies
+    for the folder holding its manifests and segments, valid for
+    MEDIA_COOKIE_TTL_SECONDS. Anyone who may read the video may stream it,
+    signed in or not.
+
+    The player calls it before opening the stream, again before
+    `expires_at`, and once more if the CDN answers 403. `expires_at` is null
+    when the API has no signing key (local runs against unsigned media)."""
+    video = _load_for_viewer(db, video_id, request)
+    folder = media_signing.media_folder(video.dash_manifest_s3_key, video.hls_manifest_s3_key)
+    if video.status != VideoStatus.COMPLETED or folder is None:
+        raise APIError(409, "video_not_ready", "Video is not ready to play")
+    # Per-viewer cookies: never cached by the edge or the browser.
+    response.headers["Cache-Control"] = "no-store"
+    signed = media_signing.sign_cookies(folder)
+    if signed is None:
+        return PlaybackResponse(expires_at=None)
+    s = get_settings()
+    for name, value in signed.values.items():
+        response.set_cookie(
+            name, value,
+            max_age=s.media_cookie_ttl_seconds, path=signed.path,
+            httponly=True, secure=s.cookie_secure, samesite=s.cookie_samesite,
+        )
+    return PlaybackResponse(expires_at=signed.expires_at)

@@ -62,7 +62,8 @@ class UploadCancel {
 typedef UploadProgress = void Function(int sent, int total);
 
 /// The browser APIs the app needs beyond Flutter: file selection, frame
-/// capture, uploads to presigned URLs, and the leave-page warning.
+/// capture, uploads to presigned URLs, the leave-page warning, local
+/// storage, and the page lifecycle.
 /// Pages and cubits take it from the widget tree, so tests swap in a fake.
 abstract class Browser {
   /// Opens the file chooser. Null when the user cancels.
@@ -101,6 +102,28 @@ abstract class Browser {
   /// time, so listen rather than assume.
   ValueListenable<bool> get fullscreen;
   Future<void> setFullscreen(bool on);
+
+  /// `window.localStorage`, shared by every tab of this origin. Reads give
+  /// null and writes do nothing when storage is blocked (some private
+  /// modes), so callers keep their own copy too.
+  String? readLocal(String key);
+  void writeLocal(String key, String value);
+  void removeLocal(String key);
+
+  /// Every stored key that starts with [prefix].
+  List<String> localKeys(String prefix);
+
+  /// Calls [onHidden] when the tab is hidden or the page is being unloaded
+  /// (`visibilitychange` to hidden, `pagehide`), and [onVisible] when it is
+  /// shown again. Returns the unsubscribe function.
+  void Function() listenForVisibility({
+    required void Function() onHidden,
+    required void Function() onVisible,
+  });
+
+  /// POSTs [json] to [url] with the session cookies as a keepalive request:
+  /// the one request a closing tab can still send. The answer is not read.
+  void postOnExit(String url, String json);
 }
 
 Browser createBrowser() => impl.createBrowser();

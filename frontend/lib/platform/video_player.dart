@@ -90,8 +90,13 @@ class PlayerValue extends Equatable {
 abstract class PlayerController extends ValueNotifier<PlayerValue> {
   PlayerController() : super(const PlayerValue());
 
-  /// Loads [source], replacing whatever was playing.
-  Future<void> open(PlaybackSource source, {bool autoplay = true});
+  /// Loads [source], replacing whatever was playing. [startAt] starts it
+  /// part-way in (resuming where the viewer stopped).
+  Future<void> open(
+    PlaybackSource source, {
+    bool autoplay = true,
+    Duration? startAt,
+  });
 
   Future<void> play();
   void pause();
