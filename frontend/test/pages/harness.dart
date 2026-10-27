@@ -223,9 +223,10 @@ class Harness {
           Future.value(DateTime.now().add(const Duration(hours: 1))),
     );
     when(() => videos.streamUrl(any())).thenAnswer(
-      (inv) => Uri.parse(
-        'http://api.test',
-      ).resolve(inv.positionalArguments.first as String).toString(),
+      (inv) =>
+          Uri.parse('http://api.test')
+              .resolve(inv.positionalArguments.first as String)
+              .toString(),
     );
   }
 

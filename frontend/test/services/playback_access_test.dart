@@ -16,9 +16,9 @@ void main() {
   setUp(() {
     videos = MockVideoService();
     asked = [];
-    when(() => videos.streamUrl(any())).thenAnswer(
-      (inv) => 'https://app.test${inv.positionalArguments.first}',
-    );
+    when(
+      () => videos.streamUrl(any()),
+    ).thenAnswer((inv) => 'https://app.test${inv.positionalArguments.first}');
     when(() => videos.authorizePlayback('v1')).thenAnswer((_) async {
       asked.add(clock());
       return clock().add(const Duration(hours: 1));
